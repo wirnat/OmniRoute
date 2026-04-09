@@ -156,6 +156,8 @@
     "playground": "Playground",
     "searchTools": "Search Tools",
     "agents": "Agents",
+    "memory": "Memory",
+    "skills": "Skills",
     "docs": "Docs",
     "issues": "Issues",
     "endpoints": "Endpoints",
@@ -722,6 +724,10 @@
           },
           "4": {
             "title": "Select Model"
+          },
+          "5": {
+            "title": "Use Thinking Variant",
+            "desc": "For thinking models, run with --variant high/low/max (example command below)."
           }
         },
         "notes": {
@@ -748,6 +754,30 @@
         },
         "notes": {
           "0": "Kiro requires Amazon account."
+        }
+      },
+      "windsurf": {
+        "steps": {
+          "1": {
+            "title": "Open AI Settings",
+            "desc": "Click the AI Settings icon in Windsurf or go to Settings"
+          },
+          "2": {
+            "title": "Add Custom Provider",
+            "desc": "Select \"Add custom provider\" (OpenAI-compatible)"
+          },
+          "3": {
+            "title": "Base URL",
+            "desc": "http://127.0.0.1:20128/v1"
+          },
+          "4": {
+            "title": "API Key",
+            "desc": "Select your OmniRoute API key"
+          },
+          "5": {
+            "title": "Select Model",
+            "desc": "Choose a model from the dropdown"
+          }
         }
       }
     }
@@ -803,6 +833,8 @@
     "priorityDesc": "Sequential fallback: tries model 1 first, then 2, etc.",
     "weightedDesc": "Distributes traffic by weight percentage with fallback",
     "roundRobinDesc": "Circular distribution: each request goes to the next model in rotation",
+    "contextRelay": "Context Relay",
+    "contextRelayDesc": "Preserves session continuity with handoff summaries when accounts rotate",
     "randomDesc": "Uniform random selection, then fallback to remaining models",
     "leastUsedDesc": "Picks the model with fewest requests, balancing load over time",
     "costOptimizedDesc": "Routes to the cheapest model first based on pricing",
@@ -814,6 +846,13 @@
     "retryDelay": "Retry Delay (ms)",
     "concurrencyPerModel": "Concurrency / Model",
     "queueTimeout": "Queue Timeout (ms)",
+    "contextRelayHandoffThreshold": "Handoff Threshold",
+    "contextRelayHandoffThresholdHelp": "When quota usage reaches this threshold, OmniRoute generates a structured handoff summary before the active account is exhausted.",
+    "contextRelayMaxMessages": "Max Messages For Summary",
+    "contextRelayMaxMessagesHelp": "Limits how much recent history is condensed into the relay summary.",
+    "contextRelaySummaryModel": "Summary Model",
+    "contextRelaySummaryModelHelp": "Optional override model used only for generating the handoff summary. Leave empty to reuse the active combo model.",
+    "contextRelayProviderNote": "Context Relay currently generates handoffs for Codex account rotation. Pair it with multiple accounts of the same provider for the best continuity.",
     "advancedHint": "Leave empty to use global defaults. These override per-provider settings.",
     "moveUp": "Move up",
     "moveDown": "Move down",
@@ -856,6 +895,11 @@
         "when": "Cost reduction is your top priority.",
         "avoid": "Pricing data is missing or outdated.",
         "example": "Background or batch jobs where lower cost is preferred."
+      },
+      "strict-random": {
+        "when": "Use when you want perfectly even spread — each model used once before repeating.",
+        "avoid": "Avoid when models have different quality or latency and order matters.",
+        "example": "Example: Multiple accounts of the same model to distribute usage evenly."
       }
     },
     "advancedHelp": {
@@ -949,10 +993,21 @@
         "tip1": "Ensure pricing coverage for all selected models.",
         "tip2": "Keep a quality fallback for hard prompts.",
         "tip3": "Use for batch/background jobs where cost is the main KPI."
+      },
+      "strict-random": {
+        "title": "Shuffle deck distribution",
+        "description": "Each model is used exactly once per cycle before reshuffling.",
+        "tip1": "Use at least 2 models for meaningful distribution.",
+        "tip2": "Works best with equivalent-performance models.",
+        "tip3": "Ideal for load balancing across multiple API accounts."
       }
     },
     "templateFreeStack": "Free Stack ($0)",
-    "templateFreeStackDesc": "Round-robin across all free providers: Kiro (Claude), Qoder (5 models), Qwen (4 models), Gemini CLI. Zero cost, never stops coding."
+    "templateFreeStackDesc": "Round-robin across all free providers: Kiro (Claude), Qoder (5 models), Qwen (4 models), Gemini CLI. Zero cost, never stops coding.",
+    "auto": "Auto Combo",
+    "autoDesc": "Self-healing smart routing pool (Performance optimized)",
+    "lkgp": "LKGP Mode",
+    "lkgpDesc": "Last Known Good Provider (Predictable resilience)"
   },
   "costs": {
     "title": "Costs",
@@ -991,6 +1046,8 @@
     "audioTranscriptionDesc": "Transcribe audio files to text (Whisper)",
     "textToSpeech": "Text to Speech",
     "textToSpeechDesc": "Convert text to natural-sounding speech",
+    "musicGeneration": "Music Generation",
+    "musicDesc": "Generate music and audio tracks via ComfyUI (Stable Audio, MusicGen)",
     "moderations": "Moderations",
     "moderationsDesc": "Content moderation and safety classification",
     "responsesDesc": "OpenAI Responses API for Codex and advanced agentic workflows",
@@ -1226,6 +1283,57 @@
     "events": "Events",
     "artifacts": "Artifacts"
   },
+  "memory": {
+    "title": "Memory Management",
+    "description": "View and manage stored memory entries",
+    "memories": "Memories",
+    "totalEntries": "Total Entries",
+    "tokensUsed": "Tokens Used",
+    "hitRate": "Hit Rate",
+    "loading": "Loading memories...",
+    "noMemories": "No memories found",
+    "search": "Search memories...",
+    "allTypes": "All Types",
+    "export": "Export",
+    "import": "Import",
+    "addMemory": "Add Memory",
+    "type": "Type",
+    "key": "Key",
+    "content": "Content",
+    "created": "Created",
+    "actions": "Actions",
+    "factual": "Factual",
+    "episodic": "Episodic",
+    "procedural": "Procedural",
+    "semantic": "Semantic"
+  },
+  "skills": {
+    "title": "Skills",
+    "description": "Manage and monitor AI skills",
+    "skillsTab": "Skills",
+    "executionsTab": "Executions",
+    "sandboxTab": "Sandbox",
+    "loading": "Loading skills...",
+    "noSkills": "No skills found",
+    "noExecutions": "No executions found",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "version": "Version",
+    "tableDescription": "Description",
+    "skill": "Skill",
+    "status": "Status",
+    "duration": "Duration",
+    "time": "Time",
+    "sandboxConfig": "Sandbox Configuration",
+    "cpuLimit": "CPU Limit",
+    "cpuLimitDesc": "Maximum execution time per skill",
+    "memoryLimit": "Memory Limit",
+    "memoryLimitDesc": "Maximum memory allocation",
+    "timeout": "Timeout",
+    "timeoutDesc": "Maximum wait time for response",
+    "networkAccess": "Network Access",
+    "networkAccessDesc": "Allow outbound network requests"
+  },
   "health": {
     "title": "System Health",
     "description": "Real-time monitoring of your OmniRoute instance",
@@ -1450,6 +1558,7 @@
     "failedCreate": "Failed to create provider",
     "errorOccurred": "An error occurred. Please try again.",
     "modelStatus": "Model Status",
+    "showConfiguredOnly": "Configured only",
     "allModelsOperational": "All models operational",
     "modelsWithIssues": "{count} model(s) with issues",
     "allModelsNormal": "All models are responding normally.",
@@ -1502,6 +1611,7 @@
     "chatCompletions": "Chat Completions",
     "importingModels": "Importing...",
     "importFromModels": "Import from /models",
+    "modelsImported": "{count} models imported",
     "allModelsAlreadyImported": "All models already imported",
     "noNewModelsToImport": "No new models to import — all models are already in the registry or custom models list",
     "skippingExistingModels": "Skipping {count} existing models",
@@ -1523,6 +1633,7 @@
     "importFailed": "Import failed",
     "noNewModelsAdded": "No new models were added.",
     "adding": "Adding...",
+    "close": "Close",
     "importingModelsTitle": "Importing Models",
     "copyModel": "Copy model",
     "removeModel": "Remove model",
@@ -1682,7 +1793,10 @@
     "chatPathHint": "Custom chat path for providers with non-standard APIs (e.g. /v4/chat/completions)",
     "modelsPathLabel": "Models Endpoint Path",
     "modelsPathPlaceholder": "/models",
-    "modelsPathHint": "Custom models path for validation (e.g. /v4/models)"
+    "modelsPathHint": "Custom models path for validation (e.g. /v4/models)",
+    "statusDeactivated": "Deactivated (Manual)",
+    "statusBanned": "Banned / Sandbox Violation",
+    "statusCreditsExhausted": "Insufficient Balance / Quota Exhausted"
   },
   "settings": {
     "title": "Settings",
@@ -1705,6 +1819,46 @@
     "enablePassword": "Enable Password",
     "darkMode": "Dark Mode",
     "lightMode": "Light Mode",
+    "memoryTitle": "Memory",
+    "memoryDesc": "Persistent cross-session conversational memory",
+    "memoryEnabled": "Enable Memory",
+    "memoryEnabledDesc": "When enabled, OmniRoute will inject relevant past context.",
+    "maxTokens": "Max Tokens",
+    "retentionDays": "Retention",
+    "recent": "Recent",
+    "recentDesc": "Chronological window",
+    "semantic": "Semantic",
+    "semanticDesc": "Vector search",
+    "hybrid": "Hybrid",
+    "hybridDesc": "Recent + Semantic",
+    "skillsTitle": "Skills",
+    "skillsDesc": "Tools for models",
+    "skillsEnabled": "Enable Skills",
+    "skillsEnabledDesc": "Allows agents to trigger functions.",
+    "skillsComingSoon": "Skills marketplace coming soon.",
+    "memorySkillsTitle": "Memory & Skills",
+    "memorySkillsDesc": "Persistent context & capabilities",
+    "modelsDevTitle": "Model Database",
+    "modelsDevDesc": "Auto-sync pricing, capabilities & specs from models.dev",
+    "modelsDevEnabled": "Enable models.dev Sync",
+    "modelsDevEnabledDesc": "Fetch model pricing, capabilities, and specs from the open-source models.dev database",
+    "modelsDevInterval": "Sync Interval",
+    "syncNow": "Sync Now",
+    "syncing": "Syncing...",
+    "lastSync": "Last sync",
+    "never": "Never",
+    "justNow": "Just now",
+    "modelsDevStats": "Sync Statistics",
+    "modelsDevStatsDesc": "Current models.dev data coverage",
+    "providers": "Providers",
+    "modelsWithPricing": "Models with Pricing",
+    "capabilities": "Capabilities",
+    "lastSyncCount": "Last Sync Count",
+    "lastSyncFull": "Last full sync",
+    "modelsDevInfo": "How It Works",
+    "modelsDevInfoDesc": "models.dev is an open-source database of AI model specifications maintained by the SST/OpenCode team. It provides pricing, capabilities, context limits, and modalities for 4,000+ models across 100+ providers.",
+    "modelsDevInfoResolution": "Pricing resolution order (highest priority first):",
+    "modelsDevInfoOrder": "User Override → models.dev → LiteLLM → Hardcoded Default",
     "systemTheme": "System Theme",
     "debugToggle": "Enable Debug Mode",
     "sidebarVisibilityToggle": "Show Sidebar Items",
@@ -1712,6 +1866,8 @@
     "cacheTTL": "Cache TTL",
     "maxCacheSize": "Max Cache Size",
     "clearCache": "Clear Cache",
+    "cacheCleared": "Cache cleared successfully",
+    "clearCacheFailed": "Failed to clear cache",
     "cacheHits": "Cache Hits",
     "cacheMisses": "Cache Misses",
     "hitRate": "Hit Rate",
@@ -1789,7 +1945,20 @@
     "themeViolet": "Violet",
     "themeOrange": "Orange",
     "themeCyan": "Cyan",
-    "promptCache": "Prompt Cache",
+    "whitelabeling": "Branding",
+    "whitelabelingDesc": "Customize the application name and logo",
+    "appName": "Application Name",
+    "appNameDesc": "Display name shown in sidebar and browser tab",
+    "customLogo": "Custom Logo URL",
+    "customLogoDesc": "URL to your custom logo image",
+    "uploadLogo": "Upload Logo",
+    "resetLogo": "Reset to Default",
+    "logoPreview": "Preview",
+    "customFavicon": "Browser Favicon",
+    "customFaviconDesc": "URL to your custom favicon (shown in browser tab)",
+    "uploadFavicon": "Upload Favicon",
+    "resetFavicon": "Reset Favicon",
+    "faviconPreview": "Favicon Preview",
     "flushCache": "Flush Cache",
     "flushing": "Flushing…",
     "size": "Size",
@@ -1811,8 +1980,8 @@
     "thinkingBudgetDesc": "Control AI reasoning token usage across all requests",
     "passthrough": "Passthrough",
     "passthroughDesc": "No changes — client controls thinking budget",
-    "auto": "Auto",
-    "autoDesc": "Strip all thinking config — let provider decide",
+    "auto": "Auto Combo",
+    "autoDesc": "Self-healing smart routing pool (Performance optimized)",
     "custom": "Custom",
     "customDesc": "Set a fixed token budget for all requests",
     "adaptive": "Adaptive",
@@ -1959,6 +2128,8 @@
     "comboStrategyAria": "Combo strategy",
     "priority": "Priority",
     "weighted": "Weighted",
+    "contextRelay": "Context Relay",
+    "contextRelayDesc": "Priority-style routing with automatic context handoffs when account rotation happens",
     "maxRetriesLabel": "Max Retries",
     "retryDelayLabel": "Retry Delay (ms)",
     "timeoutLabel": "Timeout (ms)",
@@ -1979,6 +2150,10 @@
     "maxNestingDepth": "Max Nesting Depth",
     "concurrencyPerModel": "Concurrency / Model",
     "queueTimeout": "Queue Timeout (ms)",
+    "contextRelayHandoffThreshold": "Handoff Threshold",
+    "contextRelayMaxMessages": "Max Messages For Summary",
+    "contextRelaySummaryModel": "Summary Model",
+    "contextRelayProviderNote": "Context Relay currently generates handoffs for Codex accounts and uses these values as global defaults for new or unconfigured combos.",
     "providerProfiles": "Provider Profiles",
     "providerProfilesDesc": "Separate resilience settings for OAuth (session-based) and API Key (metered) providers. OAuth providers have stricter thresholds due to lower rate limits.",
     "oauthProviders": "OAuth Providers",
@@ -2080,7 +2255,6 @@
     "unsaved": "unsaved",
     "resetDefaults": "Reset Defaults",
     "saveProvider": "Save Provider",
-    "saving": "Saving...",
     "model": "Model",
     "models": "models",
     "moreProviders": "{count} more providers",
@@ -2111,7 +2285,20 @@
     "customPricingNote": "You can override default pricing for specific models. Custom overrides take priority over auto-detected pricing.",
     "editPricing": "Edit Pricing",
     "viewFullDetails": "View Full Details",
-    "themeCoral": "Coral"
+    "themeCoral": "Coral",
+    "adaptiveVolumeRouting": "Adaptive Volume Routing",
+    "adaptiveVolumeRoutingDesc": "Scale connections dynamically based on payload volume and throughput pressure.",
+    "lkgpToggleTitle": "Last Known Good Provider (LKGP)",
+    "lkgpToggleDesc": "When enabled, the router remembers which provider last served a successful response and tries it first on subsequent requests.",
+    "clearLkgpCache": "Clear LKGP Cache",
+    "lkgpCacheCleared": "LKGP cache cleared successfully",
+    "lkgpCacheClearFailed": "Failed to clear LKGP cache",
+    "days": "Days",
+    "lkgp": "LKGP Mode",
+    "lkgpDesc": "Last Known Good Provider (Predictable resilience)",
+    "maintenance": "Maintenance",
+    "purgeExpiredLogs": "Purge Expired Logs",
+    "purgeLogsFailed": "Failed to purge logs"
   },
   "translator": {
     "title": "Translator",
@@ -2537,7 +2724,11 @@
     "waitingForOpenAIAuthorization": "Waiting for OpenAI authorization...",
     "waitingForAntigravityAuthorization": "Waiting for Antigravity authorization...",
     "waitingForQoderAuthorization": "Waiting for Qoder authorization...",
-    "exchangingCodeForTokens": "Exchanging code for tokens..."
+    "exchangingCodeForTokens": "Exchanging code for tokens...",
+    "nodeIncompatibleTitle": "Incompatible Node.js Version",
+    "nodeIncompatibleDesc": "You are running Node.js {version}, which is not compatible with OmniRoute. The native SQLite module (better-sqlite3) requires Node.js 18–22 LTS.",
+    "nodeIncompatibleFixLabel": "Fix: install Node.js 22 LTS",
+    "nodeIncompatibleHint": "OmniRoute requires Node.js ≥18 and <24. Node 22 LTS is recommended for stability."
   },
   "landing": {
     "brandName": "OmniRoute",
@@ -2961,6 +3152,7 @@
     "cachedTokensCol": "Cached",
     "cacheCreation": "Creation",
     "trend24h": "Cache Trend (24h)",
+    "peakCached": "Peak cached",
     "cached": "Cached",
     "overview": "Overview",
     "entries": "Entries",
@@ -2972,6 +3164,9 @@
     "model": "Model",
     "created": "Created",
     "expires": "Expires",
-    "actions": "Actions"
+    "actions": "Actions",
+    "deduplicatedRequests": "Deduplicated Requests",
+    "savedCalls": "Saved API Calls",
+    "totalProcessed": "Total Requests Processed"
   }
 }

@@ -2,6 +2,7 @@ import { register } from "../registry.ts";
 import { FORMATS } from "../formats.ts";
 import { CLAUDE_SYSTEM_PROMPT } from "../../config/constants.ts";
 import { adjustMaxTokens } from "../helpers/maxTokensHelper.ts";
+import { sanitizeToolId } from "../helpers/schemaCoercion.ts";
 import { DEFAULT_THINKING_CLAUDE_SIGNATURE } from "../../config/defaultThinkingSignature.ts";
 
 // Prefix for Claude OAuth tool names to avoid conflicts
@@ -109,6 +110,12 @@ export function openaiToClaudeRequest(model, body, stream) {
   // Temperature
   if (body.temperature !== undefined) {
     result.temperature = body.temperature;
+  }
+  if (body.top_p !== undefined) {
+    result.top_p = body.top_p;
+  }
+  if (body.stop !== undefined) {
+    result.stop_sequences = Array.isArray(body.stop) ? body.stop : [body.stop];
   }
 
   // Messages
@@ -231,49 +238,42 @@ export function openaiToClaudeRequest(model, body, stream) {
     }
   }
 
-  // System with Claude Code prompt and cache_control
-  const claudeCodePrompt = { type: "text", text: CLAUDE_SYSTEM_PROMPT };
-
-  if (systemParts.length > 0) {
-    const systemText = systemParts.join("\n");
-    result.system = [
-      claudeCodePrompt,
-      { type: "text", text: systemText, cache_control: { type: "ephemeral", ttl: "1h" } },
-    ];
-  } else {
-    result.system = [claudeCodePrompt];
-  }
-
   // Tools - convert from OpenAI format to Claude format with prefix for OAuth
   if (body.tools && Array.isArray(body.tools)) {
-    result.tools = body.tools.map((tool) => {
-      const toolData = tool.type === "function" && tool.function ? tool.function : tool;
-      const originalName = toolData.name;
+    result.tools = body.tools
+      .map((tool) => {
+        const toolData = tool.type === "function" && tool.function ? tool.function : tool;
+        const originalName = typeof toolData.name === "string" ? toolData.name.trim() : "";
 
-      // Claude OAuth requires prefixed tool names to avoid conflicts
-      // When prefix is disabled (non-Claude backends), use original name
-      const toolName = disableToolPrefix ? originalName : CLAUDE_OAUTH_TOOL_PREFIX + originalName;
+        if (!originalName) {
+          return null;
+        }
 
-      // Store mapping for response translation (prefixed → original)
-      if (!disableToolPrefix) {
-        toolNameMap.set(toolName, originalName);
-      }
+        // Claude OAuth requires prefixed tool names to avoid conflicts
+        // When prefix is disabled (non-Claude backends), use original name
+        const toolName = disableToolPrefix ? originalName : CLAUDE_OAUTH_TOOL_PREFIX + originalName;
 
-      // Normalize input_schema: Anthropic requires `properties` when type is "object" (#595).
-      // MCP tools (e.g. pencil, computer_use) may omit properties on object-type schemas.
-      const rawSchema: Record<string, unknown> = toolData.parameters ||
-        toolData.input_schema || { type: "object", properties: {}, required: [] };
-      const normalizedSchema =
-        rawSchema.type === "object" && !rawSchema.properties
-          ? { ...rawSchema, properties: {} }
-          : rawSchema;
+        // Store mapping for response translation (prefixed → original)
+        if (!disableToolPrefix) {
+          toolNameMap.set(toolName, originalName);
+        }
 
-      return {
-        name: toolName,
-        description: toolData.description || "",
-        input_schema: normalizedSchema,
-      };
-    });
+        // Normalize input_schema: Anthropic requires `properties` when type is "object" (#595).
+        // MCP tools (e.g. pencil, computer_use) may omit properties on object-type schemas.
+        const rawSchema: Record<string, unknown> = toolData.parameters ||
+          toolData.input_schema || { type: "object", properties: {}, required: [] };
+        const normalizedSchema =
+          rawSchema.type === "object" && !rawSchema.properties
+            ? { ...rawSchema, properties: {} }
+            : rawSchema;
+
+        return {
+          name: toolName,
+          description: toolData.description || "",
+          input_schema: normalizedSchema,
+        };
+      })
+      .filter((tool): tool is ClaudeTool => Boolean(tool));
 
     // Filter out tools with empty names (would cause Claude 400 error)
     result.tools = result.tools.filter((tool) => tool.name && tool.name?.trim());
@@ -308,6 +308,19 @@ export function openaiToClaudeRequest(model, body, stream) {
         "You must respond with valid JSON. Respond ONLY with a JSON object, no other text."
       );
     }
+  }
+
+  // System with Claude Code prompt and cache_control
+  const claudeCodePrompt = { type: "text", text: CLAUDE_SYSTEM_PROMPT };
+
+  if (systemParts.length > 0) {
+    const systemText = systemParts.join("\n");
+    result.system = [
+      claudeCodePrompt,
+      { type: "text", text: systemText, cache_control: { type: "ephemeral", ttl: "1h" } },
+    ];
+  } else {
+    result.system = [claudeCodePrompt];
   }
 
   // Thinking configuration
@@ -398,6 +411,11 @@ function getContentBlocksFromMessage(msg, toolNameMap = new Map(), disableToolPr
               type: "image",
               source: { type: "base64", media_type: match[1], data: match[2] },
             });
+          } else if (typeof url === "string" && url.trim()) {
+            blocks.push({
+              type: "image",
+              source: { type: "url", url },
+            });
           }
         } else if (part.type === "image" && part.source) {
           blocks.push({ type: "image", source: part.source });
@@ -428,7 +446,12 @@ function getContentBlocksFromMessage(msg, toolNameMap = new Map(), disableToolPr
           // Tool name already has prefix from tool declarations, keep as-is
           // CRITICAL: Skip tool_use blocks with empty name (causes Claude 400 error)
           if (part.name && part.name.trim()) {
-            blocks.push({ type: "tool_use", id: part.id, name: part.name, input: part.input });
+            blocks.push({
+              type: "tool_use",
+              id: sanitizeToolId(part.id),
+              name: part.name,
+              input: part.input,
+            });
           }
         }
       }
@@ -450,7 +473,7 @@ function getContentBlocksFromMessage(msg, toolNameMap = new Map(), disableToolPr
           const toolName = disableToolPrefix ? fnName : CLAUDE_OAUTH_TOOL_PREFIX + fnName;
           blocks.push({
             type: "tool_use",
-            id: tc.id,
+            id: sanitizeToolId(tc.id),
             name: toolName,
             input: tryParseJSON(tc.function.arguments),
           });

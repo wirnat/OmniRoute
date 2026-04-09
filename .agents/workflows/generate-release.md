@@ -27,6 +27,23 @@ Phase 2 (post-merge): tag → publish → GitHub release → Docker → deploy
 
 ---
 
+## Phase 0: Security Verification (MANDATORY)
+
+Before creating the release, you must ensure the codebase and supply chain are secure and free of known vulnerabilities.
+
+1. **Run Local Dependencies Audit:**
+
+   ```bash
+   npm audit
+   ```
+
+   _Fix any `high` or `critical` vulnerabilities identified._
+
+2. **Check GitHub CodeQL & Dependabot Alerts:**
+   Navigate to the repository's **Security** tab on GitHub, or use the project's `vulnerability-scanner` skill to analyze active alerts. Ensure all static analysis findings (e.g., prototype pollution, insecure randomness, ReDoS, shell injections) are addressed and logically committed on a target branch.
+
+---
+
 ## Phase 1: Pre-Merge
 
 ### 1. Create release branch
@@ -186,9 +203,14 @@ Inform the user:
 git checkout main
 git pull origin main
 VERSION=$(node -p "require('./package.json').version")
+
+# Extracts the changelog section for this version
+NOTES=$(awk "/^## \\[$VERSION\\]/{flag=1; next} /^## \\[[0-9]+/{if(flag) exit} flag" CHANGELOG.md | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+if [ -z "$NOTES" ]; then NOTES="OmniRoute v$VERSION Release"; fi
+
 git tag -a "v$VERSION" -m "Release v$VERSION"
 git push origin --tags
-gh release create "v$VERSION" --title "v$VERSION" --notes "OmniRoute v$VERSION Release" --target main
+gh release create "v$VERSION" --title "v$VERSION" --notes "$NOTES" --target main
 ```
 
 ### 14. 🐳 Trigger Docker Hub build (MANDATORY — keep npm and Docker in sync)
@@ -221,15 +243,15 @@ gh workflow run docker-publish.yml --repo diegosouzapw/OmniRoute --ref v2.x.y
 
 ```bash
 # Build and pack locally
-cd /home/diegosouzapw/dev/proxys/9router && npm run build:cli && npm pack --ignore-scripts
+cd /home/diegosouzapw/dev/proxys/9router && rm -f omniroute-*.tgz && rm -rf .next/cache app/.next/cache && npm run build:cli && rm -rf app/logs app/coverage app/.git app/.app-build-backup* && npm pack --ignore-scripts
 
 # Deploy to LOCAL VPS (192.168.0.15)
 scp omniroute-*.tgz root@192.168.0.15:/tmp/
-ssh root@192.168.0.15 "npm install -g /tmp/omniroute-*.tgz --ignore-scripts && pm2 restart omniroute && pm2 save"
+ssh root@192.168.0.15 "npm install -g /tmp/omniroute-*.tgz --ignore-scripts && cd /usr/lib/node_modules/omniroute/app && npm rebuild better-sqlite3 && pm2 delete omniroute 2>/dev/null; pm2 start /root/.omniroute/ecosystem.config.cjs --update-env && pm2 save && echo '✅ Local done'"
 
 # Deploy to AKAMAI VPS (69.164.221.35)
 scp omniroute-*.tgz root@69.164.221.35:/tmp/
-ssh root@69.164.221.35 "npm install -g /tmp/omniroute-*.tgz --ignore-scripts && pm2 restart omniroute && pm2 save"
+ssh root@69.164.221.35 "npm install -g /tmp/omniroute-*.tgz --ignore-scripts && cd /usr/lib/node_modules/omniroute/app && npm rebuild better-sqlite3 && pm2 delete omniroute 2>/dev/null; pm2 start /root/.omniroute/ecosystem.config.cjs --update-env && pm2 save && echo '✅ Akamai done'"
 
 # Verify both
 curl -s -o /dev/null -w "LOCAL:  HTTP %{http_code}\n" http://192.168.0.15:20128/

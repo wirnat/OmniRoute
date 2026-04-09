@@ -32,12 +32,23 @@ export const createProviderSchema = z.object({
     .superRefine((data, ctx) => {
       if (!data) return;
       const baseUrl = data.baseUrl;
-      if (baseUrl === undefined) return;
-      if (typeof baseUrl !== "string" || !isHttpUrl(baseUrl)) {
+      if (baseUrl !== undefined && (typeof baseUrl !== "string" || !isHttpUrl(baseUrl))) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: "providerSpecificData.baseUrl must be a valid http(s) URL",
           path: ["baseUrl"],
+        });
+      }
+      const customUserAgent = data.customUserAgent;
+      if (
+        customUserAgent !== undefined &&
+        customUserAgent !== null &&
+        (typeof customUserAgent !== "string" || customUserAgent.length > 500)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "providerSpecificData.customUserAgent must be a string up to 500 chars",
+          path: ["customUserAgent"],
         });
       }
     }),
@@ -47,6 +58,7 @@ export const createProviderSchema = z.object({
 
 export const createKeySchema = z.object({
   name: z.string().min(1, "Name is required").max(200),
+  noLog: z.boolean().optional(),
 });
 
 // ──── Combo Schemas ────
@@ -60,20 +72,11 @@ const comboModelEntry = z.union([
   }),
 ]);
 
-// Per-combo config overrides
-const comboConfigSchema = z
-  .object({
-    maxRetries: z.number().int().min(0).max(10).optional(),
-    retryDelayMs: z.number().int().min(0).max(60000).optional(),
-    timeoutMs: z.number().int().min(1000).max(600000).optional(),
-    healthCheckEnabled: z.boolean().optional(),
-  })
-  .optional();
-
 const comboStrategySchema = z.enum([
   "priority",
   "weighted",
   "round-robin",
+  "context-relay",
   "random",
   "least-used",
   "cost-optimized",
@@ -82,40 +85,10 @@ const comboStrategySchema = z.enum([
   "fill-first",
   // #729 schema fixes for combo edit/save
   "p2c",
+  "auto",
+  "lkgp",
+  "context-optimized",
 ]);
-
-const comboRuntimeConfigSchema = z
-  .object({
-    strategy: comboStrategySchema.optional(),
-    maxRetries: z.coerce.number().int().min(0).max(10).optional(),
-    retryDelayMs: z.coerce.number().int().min(0).max(60000).optional(),
-    timeoutMs: z.coerce.number().int().min(1000).max(600000).optional(),
-    concurrencyPerModel: z.coerce.number().int().min(1).max(20).optional(),
-    queueTimeoutMs: z.coerce.number().int().min(1000).max(120000).optional(),
-    healthCheckEnabled: z.boolean().optional(),
-    healthCheckTimeoutMs: z.coerce.number().int().min(100).max(30000).optional(),
-    maxComboDepth: z.coerce.number().int().min(1).max(10).optional(),
-    trackMetrics: z.boolean().optional(),
-  })
-  .strict();
-
-export const createComboSchema = z.object({
-  name: z
-    .string()
-    .min(1, "Name is required")
-    .max(100)
-    .regex(/^[a-zA-Z0-9_/.-]+$/, "Name can only contain letters, numbers, -, _, / and ."),
-  models: z.array(comboModelEntry).optional().default([]),
-  strategy: comboStrategySchema.optional().default("priority"),
-  config: comboConfigSchema,
-  allowedProviders: z.array(z.string().max(200)).optional(),
-  system_message: z.string().max(50000).optional(),
-  tool_filter_regex: z.string().max(1000).optional(),
-  context_cache_protection: z.boolean().optional(),
-  context_length: z.number().int().min(1000).max(2000000).optional(),
-});
-
-// ──── Auto-Combo Schemas ────
 
 const scoringWeightsSchema = z
   .object({
@@ -128,6 +101,50 @@ const scoringWeightsSchema = z
     tierPriority: z.number().min(0).max(1).optional().default(0.05),
   })
   .optional();
+
+const comboRuntimeConfigSchema = z
+  .object({
+    strategy: comboStrategySchema.optional(),
+    maxRetries: z.coerce.number().int().min(0).max(10).optional(),
+    retryDelayMs: z.coerce.number().int().min(0).max(60000).optional(),
+    timeoutMs: z.coerce.number().int().min(1000).max(600000).optional(),
+    concurrencyPerModel: z.coerce.number().int().min(1).max(20).optional(),
+    queueTimeoutMs: z.coerce.number().int().min(1000).max(120000).optional(),
+    healthCheckEnabled: z.boolean().optional(),
+    healthCheckTimeoutMs: z.coerce.number().int().min(100).max(30000).optional(),
+    handoffThreshold: z.coerce.number().min(0.5).max(0.94).optional(),
+    handoffModel: z.string().trim().max(200).optional(),
+    handoffProviders: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
+    maxMessagesForSummary: z.coerce.number().int().min(5).max(100).optional(),
+    maxComboDepth: z.coerce.number().int().min(1).max(10).optional(),
+    trackMetrics: z.boolean().optional(),
+    // Auto-Combo / LKGP Extensions
+    candidatePool: z.array(z.string().min(1)).optional(),
+    weights: scoringWeightsSchema.optional(),
+    modePack: z.string().max(100).optional(),
+    budgetCap: z.number().positive().optional(),
+    explorationRate: z.number().min(0).max(1).optional(),
+    routerStrategy: z.string().optional(),
+  })
+  .strict();
+
+export const createComboSchema = z.object({
+  name: z
+    .string()
+    .min(1, "Name is required")
+    .max(100)
+    .regex(/^[a-zA-Z0-9_/.-]+$/, "Name can only contain letters, numbers, -, _, / and ."),
+  models: z.array(comboModelEntry).optional().default([]),
+  strategy: comboStrategySchema.optional().default("priority"),
+  config: comboRuntimeConfigSchema.optional(),
+  allowedProviders: z.array(z.string().max(200)).optional(),
+  system_message: z.string().max(50000).optional(),
+  tool_filter_regex: z.string().max(1000).optional(),
+  context_cache_protection: z.boolean().optional(),
+  context_length: z.number().int().min(1000).max(2000000).optional(),
+});
+
+// ──── Auto-Combo Schemas ────
 
 export const createAutoComboSchema = z.object({
   id: z.string().trim().min(1, "id is required").max(100),
@@ -767,7 +784,6 @@ const nonEmptyJsonRecordSchema = jsonRecordSchema.refine(
 
 const translatorLogFileSchema = z.enum([
   "1_req_client.json",
-  "2_req_source.json",
   "3_req_openai.json",
   "4_req_target.json",
   "5_res_provider.txt",
@@ -808,8 +824,8 @@ export const translatorTranslateSchema = z
 export const oauthExchangeSchema = z.object({
   code: z.string().trim().min(1),
   redirectUri: z.string().trim().min(1),
-  codeVerifier: z.string().trim().min(1),
-  state: z.string().optional(),
+  codeVerifier: z.string().trim().min(1).optional(),
+  state: z.string().nullable().optional(),
 });
 
 export const oauthPollSchema = z.object({
@@ -967,6 +983,7 @@ export const createProviderNodeSchema = z
     apiType: z.enum(["chat", "responses"]).optional(),
     baseUrl: z.string().trim().min(1).optional(),
     type: z.enum(["openai-compatible", "anthropic-compatible"]).optional(),
+    compatMode: z.enum(["cc"]).optional(),
     chatPath: z.string().trim().startsWith("/").max(500).optional().or(z.literal("")),
     modelsPath: z.string().trim().startsWith("/").max(500).optional().or(z.literal("")),
   })
@@ -994,6 +1011,8 @@ export const providerNodeValidateSchema = z.object({
   baseUrl: z.string().trim().min(1, "Base URL and API key required"),
   apiKey: z.string().trim().min(1, "Base URL and API key required"),
   type: z.enum(["openai-compatible", "anthropic-compatible"]).optional(),
+  compatMode: z.enum(["cc"]).optional(),
+  chatPath: z.string().trim().startsWith("/").max(500).optional().or(z.literal("")),
   modelsPath: z.string().trim().startsWith("/").max(500).optional().or(z.literal("")),
 });
 
@@ -1022,12 +1041,23 @@ export const updateProviderConnectionSchema = z
       .superRefine((data, ctx) => {
         if (!data) return;
         const baseUrl = data.baseUrl;
-        if (baseUrl === undefined) return;
-        if (typeof baseUrl !== "string" || !isHttpUrl(baseUrl)) {
+        if (baseUrl !== undefined && (typeof baseUrl !== "string" || !isHttpUrl(baseUrl))) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
             message: "providerSpecificData.baseUrl must be a valid http(s) URL",
             path: ["baseUrl"],
+          });
+        }
+        const customUserAgent = data.customUserAgent;
+        if (
+          customUserAgent !== undefined &&
+          customUserAgent !== null &&
+          (typeof customUserAgent !== "string" || customUserAgent.length > 500)
+        ) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "providerSpecificData.customUserAgent must be a string up to 500 chars",
+            path: ["customUserAgent"],
           });
         }
       }),
@@ -1064,6 +1094,7 @@ export const validateProviderApiKeySchema = z.object({
   provider: z.string().trim().min(1, "Provider and API key required"),
   apiKey: z.string().trim().min(1, "Provider and API key required"),
   validationModelId: z.string().trim().optional(),
+  customUserAgent: z.string().trim().max(500).optional(),
 });
 
 const geminiPartSchema = z
@@ -1318,3 +1349,11 @@ export const updateAutoDisableAccountsSchema = z
     threshold: z.number().int().min(1).max(10).optional(),
   })
   .strict();
+
+export const versionManagerToolSchema = z.object({
+  tool: z.string().trim().min(1),
+});
+
+export const versionManagerInstallSchema = versionManagerToolSchema.extend({
+  version: z.string().trim().optional(),
+});

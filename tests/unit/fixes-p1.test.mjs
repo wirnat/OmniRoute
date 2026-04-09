@@ -14,11 +14,14 @@ const backupDb = await import("../../src/lib/db/backup.ts");
 const providersDb = await import("../../src/lib/db/providers.ts");
 const combosDb = await import("../../src/lib/db/combos.ts");
 const settingsDb = await import("../../src/lib/db/settings.ts");
+const localDb = await import("../../src/lib/localDb.ts");
 const tokenRefresh = await import("../../open-sse/services/tokenRefresh.ts");
 const proxyFetch = await import("../../open-sse/utils/proxyFetch.ts");
 const proxyDispatcher = await import("../../open-sse/utils/proxyDispatcher.ts");
 const proxySettingsRoute = await import("../../src/app/api/settings/proxy/route.ts");
 const proxyTestRoute = await import("../../src/app/api/settings/proxy/test/route.ts");
+const shutdownRoute = await import("../../src/app/api/shutdown/route.ts");
+const restartRoute = await import("../../src/app/api/restart/route.ts");
 
 async function withEnv(name, value, fn) {
   const previous = process.env[name];
@@ -140,6 +143,80 @@ test(
     assert.equal(row.cnt, 1);
   }
 );
+
+test("closeDbInstance checkpoints WAL changes into the primary SQLite file", async () => {
+  await resetStorage();
+
+  const db = core.getDbInstance();
+  const now = new Date().toISOString();
+  db.prepare(
+    "INSERT INTO provider_connections (id, provider, auth_type, name, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+  ).run("checkpoint-test-conn", "openai", "apikey", "checkpoint-test", 1, now, now);
+
+  core.closeDbInstance();
+
+  const snapshotPath = path.join(TEST_DATA_DIR, "storage-snapshot.sqlite");
+  fs.copyFileSync(core.SQLITE_FILE, snapshotPath);
+
+  const Database = (await import("better-sqlite3")).default;
+  const snapshotDb = new Database(snapshotPath, { readonly: true });
+  try {
+    const row = snapshotDb
+      .prepare("SELECT name FROM provider_connections WHERE id = ?")
+      .get("checkpoint-test-conn");
+    assert.equal(row?.name, "checkpoint-test");
+  } finally {
+    snapshotDb.close();
+  }
+});
+
+test("shutdown route uses SIGTERM for graceful shutdown", async () => {
+  const originalKill = process.kill;
+  const originalSetTimeout = globalThis.setTimeout;
+  const calls = [];
+
+  process.kill = (pid, signal) => {
+    calls.push({ pid, signal });
+    return true;
+  };
+  globalThis.setTimeout = (callback) => {
+    callback();
+    return 0;
+  };
+
+  try {
+    const response = await shutdownRoute.POST();
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, [{ pid: process.pid, signal: "SIGTERM" }]);
+  } finally {
+    process.kill = originalKill;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("restart route uses SIGTERM for graceful restart", async () => {
+  const originalKill = process.kill;
+  const originalSetTimeout = globalThis.setTimeout;
+  const calls = [];
+
+  process.kill = (pid, signal) => {
+    calls.push({ pid, signal });
+    return true;
+  };
+  globalThis.setTimeout = (callback) => {
+    callback();
+    return 0;
+  };
+
+  try {
+    const response = await restartRoute.POST();
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, [{ pid: process.pid, signal: "SIGTERM" }]);
+  } finally {
+    process.kill = originalKill;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
 
 test("unlinkFileWithRetry retries EBUSY/EPERM and eventually succeeds", async () => {
   const target = path.join(TEST_DATA_DIR, "retry-target.tmp");
@@ -460,4 +537,112 @@ test("proxy test route runs socks5 test when backend flag is enabled", async () 
     assert.equal(payload.success, false);
     assert.equal(payload.proxyUrl, "socks5://127.0.0.1:1");
   });
+});
+
+test("proxy test route validates JSON, schema, and proxy types before dispatching", async () => {
+  await resetStorage();
+
+  const invalidJsonResponse = await proxyTestRoute.POST(
+    new Request("http://localhost/api/settings/proxy/test", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{",
+    })
+  );
+  const invalidJsonBody = await invalidJsonResponse.json();
+  assert.equal(invalidJsonResponse.status, 400);
+  assert.equal(invalidJsonBody.error.message, "Invalid JSON body");
+
+  const invalidBodyResponse = await proxyTestRoute.POST(
+    new Request("http://localhost/api/settings/proxy/test", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ proxy: { port: "8080" } }),
+    })
+  );
+  const invalidBody = await invalidBodyResponse.json();
+  assert.equal(invalidBodyResponse.status, 400);
+  assert.equal(invalidBody.error.message, "Invalid request");
+
+  const socks4Response = await proxyTestRoute.POST(
+    new Request("http://localhost/api/settings/proxy/test", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        proxy: {
+          type: "socks4",
+          host: "127.0.0.1",
+          port: "1080",
+        },
+      }),
+    })
+  );
+  const socks4Body = await socks4Response.json();
+  assert.equal(socks4Response.status, 400);
+  assert.match(socks4Body.error.message, /proxy\.type must be http or https/i);
+
+  const unsupportedResponse = await proxyTestRoute.POST(
+    new Request("http://localhost/api/settings/proxy/test", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        proxy: {
+          type: "ftp",
+          host: "127.0.0.1",
+          port: "21",
+        },
+      }),
+    })
+  );
+  const unsupportedBody = await unsupportedResponse.json();
+  assert.equal(unsupportedResponse.status, 400);
+  assert.match(unsupportedBody.error.message, /proxy\.type must be http or https/i);
+});
+
+test("proxy test route handles invalid proxy ports and uses stored proxy config when proxyId is provided", async () => {
+  await resetStorage();
+
+  const invalidPortResponse = await proxyTestRoute.POST(
+    new Request("http://localhost/api/settings/proxy/test", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        proxy: {
+          type: "http",
+          host: "127.0.0.1",
+          port: "70000",
+        },
+      }),
+    })
+  );
+  const invalidPortBody = await invalidPortResponse.json();
+  assert.equal(invalidPortResponse.status, 400);
+  assert.match(invalidPortBody.error.message, /invalid proxy port/i);
+
+  const storedProxy = await localDb.createProxy({
+    name: "Stored Proxy",
+    type: "http",
+    host: "127.0.0.1",
+    port: 1,
+    username: "alice",
+    password: "secret",
+  });
+
+  const proxyIdResponse = await proxyTestRoute.POST(
+    new Request("http://localhost/api/settings/proxy/test", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        proxyId: storedProxy.id,
+        proxy: {
+          host: "127.0.0.1",
+          port: 0,
+        },
+      }),
+    })
+  );
+  const proxyIdBody = await proxyIdResponse.json();
+  assert.notEqual(proxyIdResponse.status, 400);
+  assert.equal(proxyIdBody.success, false);
+  assert.equal(proxyIdBody.proxyUrl, "http://127.0.0.1:1");
 });

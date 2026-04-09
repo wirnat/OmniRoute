@@ -2,6 +2,12 @@ import { BaseExecutor } from "./base.ts";
 import { PROVIDERS, OAUTH_ENDPOINTS } from "../config/constants.ts";
 import { getAccessToken } from "../services/tokenRefresh.ts";
 import { getRotatingApiKey } from "../services/apiKeyRotator.ts";
+import {
+  buildClaudeCodeCompatibleHeaders,
+  CLAUDE_CODE_COMPATIBLE_DEFAULT_CHAT_PATH,
+  joinClaudeCodeCompatibleUrl,
+} from "../services/claudeCodeCompatible.ts";
+import { getOpenAICompatibleType, isClaudeCodeCompatible } from "../services/provider.ts";
 
 export class DefaultExecutor extends BaseExecutor {
   constructor(provider) {
@@ -9,20 +15,32 @@ export class DefaultExecutor extends BaseExecutor {
   }
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
+    void model;
+    void stream;
+    void urlIndex;
     if (this.provider?.startsWith?.("openai-compatible-")) {
       const psd = credentials?.providerSpecificData;
       const baseUrl = psd?.baseUrl || "https://api.openai.com/v1";
       const normalized = baseUrl.replace(/\/$/, "");
       const customPath = typeof psd?.chatPath === "string" && psd.chatPath ? psd.chatPath : null;
       if (customPath) return `${normalized}${customPath}`;
-      const path = this.provider.includes("responses") ? "/responses" : "/chat/completions";
+      const path =
+        getOpenAICompatibleType(this.provider, psd) === "responses"
+          ? "/responses"
+          : "/chat/completions";
       return `${normalized}${path}`;
     }
     if (this.provider?.startsWith?.("anthropic-compatible-")) {
       const psd = credentials?.providerSpecificData;
       const baseUrl = psd?.baseUrl || "https://api.anthropic.com/v1";
-      const normalized = baseUrl.replace(/\/$/, "");
       const customPath = typeof psd?.chatPath === "string" && psd.chatPath ? psd.chatPath : null;
+      if (isClaudeCodeCompatible(this.provider)) {
+        return joinClaudeCodeCompatibleUrl(
+          baseUrl,
+          customPath || CLAUDE_CODE_COMPATIBLE_DEFAULT_CHAT_PATH
+        );
+      }
+      const normalized = baseUrl.replace(/\/$/, "");
       return `${normalized}${customPath || "/messages"}`;
     }
     switch (this.provider) {
@@ -34,6 +52,10 @@ export class DefaultExecutor extends BaseExecutor {
         return `${this.config.baseUrl}?beta=true`;
       case "gemini":
         return `${this.config.baseUrl}/${model}:${stream ? "streamGenerateContent?alt=sse" : "generateContent"}`;
+      case "qwen": {
+        const resourceUrl = credentials?.providerSpecificData?.resourceUrl;
+        return `https://${resourceUrl || "portal.qwen.ai"}/v1/chat/completions`;
+      }
       default:
         return this.config.baseUrl;
     }
@@ -70,6 +92,13 @@ export class DefaultExecutor extends BaseExecutor {
         headers["x-api-key"] = effectiveKey || credentials.accessToken;
         break;
       default:
+        if (isClaudeCodeCompatible(this.provider)) {
+          return buildClaudeCodeCompatibleHeaders(
+            effectiveKey || credentials.accessToken || "",
+            stream,
+            credentials?.providerSpecificData?.ccSessionId
+          );
+        }
         if (this.provider?.startsWith?.("anthropic-compatible-")) {
           if (effectiveKey) {
             headers["x-api-key"] = effectiveKey;
@@ -85,6 +114,17 @@ export class DefaultExecutor extends BaseExecutor {
     }
 
     if (stream) headers["Accept"] = "text/event-stream";
+
+    // Qwen header cleanup: Remove X-Dashscope-* headers if using an API key (DashScope compatible mode).
+    // If using OAuth (Qwen Code), we MUST keep them for portal.qwen.ai to accept the request.
+    if (this.provider === "qwen" && effectiveKey) {
+      for (const key of Object.keys(headers)) {
+        if (key.toLowerCase().startsWith("x-dashscope-")) {
+          delete headers[key];
+        }
+      }
+    }
+
     return headers;
   }
 

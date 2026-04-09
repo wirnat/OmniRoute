@@ -51,9 +51,6 @@ const REASONING_UNSUPPORTED_PATTERNS = [
   "antigravity/claude-sonnet-4-6",
   "antigravity/claude-sonnet-4-5",
   "antigravity/claude-sonnet-4",
-  "ag/claude-sonnet-4-6",
-  "ag/claude-sonnet-4-5",
-  "ag/claude-sonnet-4",
 ];
 
 function getRegistryReasoningFlag(providerIdOrAlias: string, modelId: string): boolean | null {
@@ -86,10 +83,9 @@ export function supportsReasoning(modelStr: string): boolean {
   const normalized = String(modelStr || "").toLowerCase();
   if (!normalized) return true;
 
-  const blocked = REASONING_UNSUPPORTED_PATTERNS.some((pattern) =>
-    normalized === pattern ||
-    normalized.endsWith(`/${pattern}`) ||
-    normalized.includes(pattern)
+  const blocked = REASONING_UNSUPPORTED_PATTERNS.some(
+    (pattern) =>
+      normalized === pattern || normalized.endsWith(`/${pattern}`) || normalized.includes(pattern)
   );
 
   return !blocked;

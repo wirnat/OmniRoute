@@ -1,13 +1,78 @@
-import { isAccountDeactivated, isCreditsExhausted } from "./accountFallback.ts";
+import {
+  isAccountDeactivated,
+  isCreditsExhausted,
+  isOAuthInvalidToken,
+} from "./accountFallback.ts";
+
+export function isEmptyContentResponse(responseBody: unknown): boolean {
+  if (!responseBody || typeof responseBody !== "object") return false;
+
+  const body = responseBody as Record<string, unknown>;
+
+  if (Array.isArray(body.choices)) {
+    const firstChoice = body.choices[0] as Record<string, unknown> | undefined;
+    if (!firstChoice) return true;
+
+    const message = firstChoice.message as Record<string, unknown> | undefined;
+    const delta = firstChoice.delta as Record<string, unknown> | undefined;
+
+    const content = message?.content ?? delta?.content;
+    const hasToolCalls =
+      (Array.isArray(message?.tool_calls) && (message.tool_calls as unknown[]).length > 0) ||
+      (Array.isArray(delta?.tool_calls) && (delta.tool_calls as unknown[]).length > 0);
+
+    const hasContent = content !== null && content !== undefined && content !== "";
+    return !hasContent && !hasToolCalls;
+  }
+
+  if (Array.isArray(body.content)) {
+    return body.content.length === 0;
+  }
+
+  if (typeof body.text === "string") {
+    return body.text.trim() === "";
+  }
+
+  if ("content" in body) {
+    const content = body.content;
+    return content === null || content === undefined || content === "";
+  }
+
+  return false;
+}
 
 export const PROVIDER_ERROR_TYPES = {
-  RATE_LIMITED: "rate_limited", // 429 — transient, retry with backoff
-  UNAUTHORIZED: "unauthorized", // 401 — token expired, refresh
-  ACCOUNT_DEACTIVATED: "account_deactivated", // 401 + deactivation signal
-  FORBIDDEN: "forbidden", // 403 — account banned/revoked, disable node
-  SERVER_ERROR: "server_error", // 500/502/503 — retry limited
-  QUOTA_EXHAUSTED: "quota_exhausted", // 402/429/400 + billing signals
+  RATE_LIMITED: "rate_limited",
+  UNAUTHORIZED: "unauthorized",
+  ACCOUNT_DEACTIVATED: "account_deactivated",
+  FORBIDDEN: "forbidden",
+  SERVER_ERROR: "server_error",
+  QUOTA_EXHAUSTED: "quota_exhausted",
+  PROJECT_ROUTE_ERROR: "project_route_error",
+  CONTEXT_OVERFLOW: "context_overflow",
+  OAUTH_INVALID_TOKEN: "oauth_invalid_token",
+  EMPTY_CONTENT: "empty_content",
 };
+
+export const CONTEXT_OVERFLOW_SIGNALS = [
+  "context overflow",
+  "prompt too large",
+  "context window",
+  "maximum context",
+  "exceeds context",
+  "input too long",
+  "token limit",
+  "too many tokens",
+  "context length",
+  "exceed.*context",
+  "messages exceed",
+];
+
+export const CONTEXT_OVERFLOW_REGEX = new RegExp(CONTEXT_OVERFLOW_SIGNALS.join("|"), "i");
+
+export function isContextOverflow(errorText: string): boolean {
+  return CONTEXT_OVERFLOW_REGEX.test(String(errorText || ""));
+}
 
 function responseBodyToString(responseBody: unknown): string {
   if (typeof responseBody === "string") return responseBody;
@@ -25,8 +90,8 @@ export function classifyProviderError(statusCode: number, responseBody: unknown)
   const bodyStr = responseBodyToString(responseBody);
   const creditsExhausted = isCreditsExhausted(bodyStr);
   const accountDeactivated = isAccountDeactivated(bodyStr);
+  const oauthInvalid = isOAuthInvalidToken(bodyStr);
 
-  // T10: credits exhausted is terminal and can appear as 400/402/429 depending on provider.
   if (
     creditsExhausted &&
     (statusCode === 400 || statusCode === 402 || statusCode === 429 || statusCode === 403)
@@ -38,8 +103,10 @@ export function classifyProviderError(statusCode: number, responseBody: unknown)
     return PROVIDER_ERROR_TYPES.RATE_LIMITED;
   }
 
-  // T06: only deactivation-like 401s should be treated as permanent account expiry.
   if (statusCode === 401) {
+    if (oauthInvalid) {
+      return PROVIDER_ERROR_TYPES.OAUTH_INVALID_TOKEN;
+    }
     return accountDeactivated
       ? PROVIDER_ERROR_TYPES.ACCOUNT_DEACTIVATED
       : PROVIDER_ERROR_TYPES.UNAUTHORIZED;
@@ -49,8 +116,17 @@ export function classifyProviderError(statusCode: number, responseBody: unknown)
   if (statusCode === 403 && accountDeactivated) {
     return PROVIDER_ERROR_TYPES.ACCOUNT_DEACTIVATED;
   }
-  if (statusCode === 403) return PROVIDER_ERROR_TYPES.FORBIDDEN;
+  if (statusCode === 403) {
+    if (bodyStr.includes("has not been used in project")) {
+      return PROVIDER_ERROR_TYPES.PROJECT_ROUTE_ERROR;
+    }
+    return PROVIDER_ERROR_TYPES.FORBIDDEN;
+  }
   if (statusCode >= 500) return PROVIDER_ERROR_TYPES.SERVER_ERROR;
+
+  if (statusCode === 400 && isContextOverflow(bodyStr)) {
+    return PROVIDER_ERROR_TYPES.CONTEXT_OVERFLOW;
+  }
 
   return null;
 }

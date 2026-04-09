@@ -20,6 +20,12 @@ function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function isBackgroundServicesDisabled(): boolean {
+  const raw = process.env.OMNIROUTE_DISABLE_BACKGROUND_SERVICES;
+  if (!raw) return false;
+  return new Set(["1", "true", "yes", "on"]).has(raw.trim().toLowerCase());
+}
+
 async function ensureSecrets(): Promise<void> {
   let getPersistedSecret = (_key: string): string | null => null;
   let persistSecret = (_key: string, _value: string): void => {};
@@ -63,6 +69,10 @@ async function ensureSecrets(): Promise<void> {
 }
 
 export async function registerNodejs(): Promise<void> {
+  // Initialize proxy fetch patch FIRST (before any HTTP requests)
+  await import("@omniroute/open-sse/index.ts");
+  console.log("[STARTUP] Global fetch proxy patch initialized");
+
   await ensureSecrets();
 
   // Trigger request-log layout migration during startup, before any request hits usageDb.
@@ -75,18 +85,24 @@ export async function registerNodejs(): Promise<void> {
     { initGracefulShutdown },
     { initApiBridgeServer },
     { startBackgroundRefresh },
+    { startProviderLimitsSyncScheduler },
     { getSettings },
   ] = await Promise.all([
     import("@/lib/gracefulShutdown"),
     import("@/lib/apiBridgeServer"),
     import("@/domain/quotaCache"),
+    import("@/shared/services/providerLimitsSyncScheduler"),
     import("@/lib/db/settings"),
   ]);
 
   initGracefulShutdown();
   initApiBridgeServer();
-  startBackgroundRefresh();
-  console.log("[STARTUP] Quota cache background refresh started");
+  if (!isBackgroundServicesDisabled()) {
+    startBackgroundRefresh();
+    console.log("[STARTUP] Quota cache background refresh started");
+    startProviderLimitsSyncScheduler();
+    console.log("[STARTUP] Provider limits sync scheduler started");
+  }
 
   try {
     const [{ setCustomAliases }, { setDefaultFastServiceTierEnabled }] = await Promise.all([

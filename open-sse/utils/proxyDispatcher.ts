@@ -1,12 +1,15 @@
-import { ProxyAgent, type Dispatcher } from "undici";
+import { Agent, ProxyAgent, type Dispatcher } from "undici";
 import { socksDispatcher } from "fetch-socks";
+import { getUpstreamTimeoutConfig } from "@/shared/utils/runtimeTimeouts";
 
 const DISPATCHER_CACHE_KEY = Symbol.for("omniroute.proxyDispatcher.cache");
+const DEFAULT_DISPATCHER_KEY = Symbol.for("omniroute.proxyDispatcher.default");
 const SUPPORTED_PROTOCOLS = new Set(["http:", "https:", "socks5:"]);
 
 type DispatcherCache = Map<string, Dispatcher>;
 type GlobalWithDispatcherCache = typeof globalThis & {
   [DISPATCHER_CACHE_KEY]?: DispatcherCache;
+  [DEFAULT_DISPATCHER_KEY]?: Dispatcher;
 };
 type SocksDispatcherOptions = {
   type: number;
@@ -38,6 +41,30 @@ function getDispatcherCache(): DispatcherCache {
 export function clearDispatcherCache() {
   const cache = getDispatcherCache();
   cache.clear();
+
+  const globalWithCache = globalThis as GlobalWithDispatcherCache;
+  delete globalWithCache[DEFAULT_DISPATCHER_KEY];
+}
+
+function getDispatcherOptions() {
+  const timeouts = getUpstreamTimeoutConfig(process.env, (message) => {
+    console.warn(`[ProxyDispatcher] ${message}`);
+  });
+
+  return {
+    headersTimeout: timeouts.fetchHeadersTimeoutMs,
+    bodyTimeout: timeouts.fetchBodyTimeoutMs,
+    connectTimeout: timeouts.fetchConnectTimeoutMs,
+    keepAliveTimeout: timeouts.fetchKeepAliveTimeoutMs,
+  };
+}
+
+export function getDefaultDispatcher(): Dispatcher {
+  const globalWithCache = globalThis as GlobalWithDispatcherCache;
+  if (!globalWithCache[DEFAULT_DISPATCHER_KEY]) {
+    globalWithCache[DEFAULT_DISPATCHER_KEY] = new Agent(getDispatcherOptions());
+  }
+  return globalWithCache[DEFAULT_DISPATCHER_KEY];
 }
 
 /**
@@ -47,11 +74,22 @@ export function clearDispatcherCache() {
  */
 function extractExplicitPort(urlStr: string): string | null {
   try {
-    // Match port in the host portion: "scheme://[user:pass@]host:PORT[/...]"
-    const match = urlStr.match(/:\/\/(?:[^@]*@)?[^:/\s]+:(\d+)/);
-    if (match) {
-      const port = Number(match[1]);
-      if (Number.isInteger(port) && port >= 1 && port <= 65535) return String(port);
+    const idx = urlStr.indexOf("://");
+    if (idx === -1) return null;
+    const authorityStart = idx + 3;
+    const authorityEnd = urlStr.indexOf("/", authorityStart);
+    const authority =
+      authorityEnd === -1
+        ? urlStr.slice(authorityStart)
+        : urlStr.slice(authorityStart, authorityEnd);
+    const lastColon = authority.lastIndexOf(":");
+    const atSign = authority.lastIndexOf("@");
+    if (lastColon !== -1 && lastColon > atSign) {
+      const portStr = authority.slice(lastColon + 1);
+      if (/^\d+$/.test(portStr)) {
+        const port = Number(portStr);
+        if (Number.isInteger(port) && port >= 1 && port <= 65535) return String(port);
+      }
     }
   } catch {}
   return null;
@@ -180,6 +218,7 @@ export function proxyConfigToUrl(
 export function createProxyDispatcher(proxyUrl: string): Dispatcher {
   const normalizedUrl = normalizeProxyUrl(proxyUrl, "proxy dispatcher");
   const dispatcherCache = getDispatcherCache();
+  const dispatcherOptions = getDispatcherOptions();
 
   let dispatcher = dispatcherCache.get(normalizedUrl);
   if (dispatcher) return dispatcher;
@@ -197,10 +236,14 @@ export function createProxyDispatcher(proxyUrl: string): Dispatcher {
     if (parsed.username) socksOptions.userId = decodeURIComponent(parsed.username);
     if (parsed.password) socksOptions.password = decodeURIComponent(parsed.password);
     dispatcher = socksDispatcher(
-      socksOptions as Parameters<typeof socksDispatcher>[0]
+      socksOptions as Parameters<typeof socksDispatcher>[0],
+      dispatcherOptions
     ) as Dispatcher;
   } else {
-    dispatcher = new ProxyAgent(normalizedUrl);
+    dispatcher = new ProxyAgent({
+      uri: normalizedUrl,
+      ...dispatcherOptions,
+    });
   }
 
   dispatcherCache.set(normalizedUrl, dispatcher);

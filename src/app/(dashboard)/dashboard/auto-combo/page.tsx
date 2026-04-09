@@ -7,6 +7,9 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { Card, Button } from "@/shared/components";
+import AutoComboModal from "./AutoComboModal";
+import { useNotificationStore } from "@/store/notificationStore";
 
 interface ProviderScore {
   provider: string;
@@ -43,21 +46,25 @@ export default function AutoComboDashboard() {
   const [incidentMode, setIncidentMode] = useState(false);
   const [modePack, setModePack] = useState("ship-fast");
 
-  const fetchData = useCallback(async () => {
-    try {
-      const [combosRes, healthRes] = await Promise.allSettled([
-        fetch("/api/combos/auto"),
-        fetch("/api/monitoring/health"),
-      ]);
+  const notify = useNotificationStore();
+  const [combos, setCombos] = useState<any[]>([]);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [editingCombo, setEditingCombo] = useState<any | null>(null);
+  const [activeProviders, setActiveProviders] = useState<any[]>([]);
 
-      if (combosRes.status === "fulfilled") {
-        const comboPayload = await combosRes.value.json();
-        const combos = Array.isArray(comboPayload?.combos)
-          ? (comboPayload.combos as AutoComboRecord[])
-          : [];
-        const firstCombo = combos[0] || null;
-        const candidatePool = Array.isArray(firstCombo?.candidatePool)
-          ? firstCombo.candidatePool.filter((entry): entry is string => typeof entry === "string")
+  const fetchCombos = useCallback(async () => {
+    try {
+      const res = await fetch("/api/combos");
+      if (res.ok) {
+        const payload = await res.json();
+        const allCombos = Array.isArray(payload?.combos) ? payload.combos : [];
+        const auto = allCombos.filter((c: any) => c.strategy === "auto" || c.strategy === "lkgp");
+        setCombos(auto);
+
+        // Refresh scores based on first auto combo found
+        const firstCombo = auto[0] || null;
+        const candidatePool = Array.isArray(firstCombo?.config?.candidatePool)
+          ? firstCombo.config.candidatePool
           : [];
         const rawWeights =
           firstCombo?.weights &&
@@ -80,9 +87,16 @@ export default function AutoComboDashboard() {
       } else {
         setScores([]);
       }
+    } catch {
+      setScores([]);
+    }
+  }, []);
 
-      if (healthRes.status === "fulfilled") {
-        const health = (await healthRes.value.json()) as HealthRecord;
+  const fetchHealth = useCallback(async () => {
+    try {
+      const healthRes = await fetch("/api/monitoring/health");
+      if (healthRes.ok) {
+        const health = (await healthRes.json()) as HealthRecord;
         const providerHealth =
           health?.providerHealth && typeof health.providerHealth === "object"
             ? health.providerHealth
@@ -125,6 +139,23 @@ export default function AutoComboDashboard() {
     }
   }, []);
 
+  const fetchData = useCallback(async () => {
+    await Promise.all([fetchCombos(), fetchHealth()]);
+
+    // Fetch active providers for the Modal
+    try {
+      const pRes = await fetch("/api/providers");
+      if (pRes.ok) {
+        const pData = await pRes.json();
+        setActiveProviders(
+          (pData.connections || []).filter(
+            (c: any) => c.testStatus === "active" || c.testStatus === "success"
+          )
+        );
+      }
+    } catch {}
+  }, [fetchCombos, fetchHealth]);
+
   useEffect(() => {
     const id = setTimeout(fetchData, 0);
     const interval = setInterval(fetchData, 30_000);
@@ -133,6 +164,59 @@ export default function AutoComboDashboard() {
       clearInterval(interval);
     };
   }, [fetchData]);
+
+  const handleCreate = async (data: any) => {
+    try {
+      const res = await fetch("/api/combos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (res.ok) {
+        await fetchCombos();
+        setShowCreateModal(false);
+        notify.success("Auto-Combo created successfully");
+      } else {
+        const err = await res.json();
+        notify.error(err.error?.message || err.error || "Failed to create combo");
+      }
+    } catch {
+      notify.error("Error creating combo");
+    }
+  };
+
+  const handleUpdate = async (id: string, data: any) => {
+    try {
+      const res = await fetch(`/api/combos/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (res.ok) {
+        await fetchCombos();
+        setEditingCombo(null);
+        notify.success("Auto-Combo updated");
+      } else {
+        const err = await res.json();
+        notify.error("Failed to update: " + (err.error?.message || err.error));
+      }
+    } catch {
+      notify.error("Error updating combo");
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm("Are you sure you want to delete this auto-combo?")) return;
+    try {
+      const res = await fetch(`/api/combos/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setCombos(combos.filter((c) => c.id !== id));
+        notify.success("Auto-combo deleted");
+      }
+    } catch {
+      notify.error("Error deleting combo");
+    }
+  };
 
   const FACTOR_LABELS: Record<string, string> = {
     quota: "📊 Quota",
@@ -144,7 +228,6 @@ export default function AutoComboDashboard() {
     tierPriority: "🏷️ Tier",
   };
 
-
   const MODE_PACKS = [
     { id: "ship-fast", label: "🚀 Ship Fast" },
     { id: "cost-saver", label: "💰 Cost Saver" },
@@ -153,102 +236,241 @@ export default function AutoComboDashboard() {
   ];
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
-      <h1 className="text-2xl font-bold mb-6">⚡ Auto-Combo Engine</h1>
-
-      {/* Status Bar */}
-      <div className="flex gap-4 mb-6">
-        <div
-          className={`px-3 py-2 rounded-lg text-sm font-medium ${incidentMode ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300" : "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300"}`}
-        >
-          {incidentMode ? "🚨 INCIDENT MODE" : "✅ Normal"}
-        </div>
-        <div className="px-3 py-2 bg-blue-100 dark:bg-blue-900/30 rounded-lg text-sm">
-          Mode: <strong>{MODE_PACKS.find((m) => m.id === modePack)?.label || modePack}</strong>
-        </div>
-      </div>
-
-      {/* Mode Pack Selector */}
-      <div className="mb-8">
-        <h2 className="text-lg font-semibold mb-3">🎛️ Mode Pack</h2>
-        <div className="flex gap-2">
-          {MODE_PACKS.map((mp) => (
-            <button
-              key={mp.id}
-              onClick={() => setModePack(mp.id)}
-              className={`px-4 py-2 rounded-lg text-sm transition-colors ${
-                modePack === mp.id
-                  ? "bg-blue-600 text-white"
-                  : "bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700"
-              }`}
-            >
-              {mp.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Provider Scores */}
-      <div className="mb-8">
-        <h2 className="text-lg font-semibold mb-3">📊 Provider Scores</h2>
-        {scores.length === 0 ? (
-          <p className="text-gray-500">
-            No auto-combo configured. Create one via <code>POST /api/combos/auto</code>.
+    <div className="flex flex-col gap-6">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h1 className="text-2xl font-semibold">⚡ Auto-Combo Engine</h1>
+          <p className="text-sm text-text-muted mt-1">
+            Smart routing automatically adapting to latency, health, and throughput
           </p>
-        ) : (
-          <div className="space-y-3">
-            {scores.map((s) => (
-              <div key={s.provider} className="p-3 bg-white dark:bg-gray-800 rounded-lg border">
-                <div className="flex justify-between items-center mb-2">
-                  <span className="font-medium">
-                    {s.provider} / {s.model}
-                  </span>
-                  <span className="font-bold text-lg">{(s.score * 100).toFixed(0)}%</span>
-                </div>
-                {/* Score Bar */}
-                <div className="h-2 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden mb-2">
-                  <div
-                    className="h-full bg-blue-500 rounded"
-                    style={{ width: `${s.score * 100}%` }}
-                  />
-                </div>
-                {/* Factor Breakdown */}
-                <div className="grid grid-cols-3 gap-1 text-xs text-gray-500">
-                  {Object.entries(s.factors || {}).map(([key, val]) => (
-                    <span key={key}>
-                      {FACTOR_LABELS[key] || key}: {((val as number) * 100).toFixed(0)}%
-                    </span>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+        </div>
+        <Button icon="add" onClick={() => setShowCreateModal(true)}>
+          Create Auto-Combo
+        </Button>
       </div>
 
-      {/* Exclusions */}
-      <div>
-        <h2 className="text-lg font-semibold mb-3">🚫 Excluded Providers</h2>
-        {exclusions.length === 0 ? (
-          <p className="text-gray-500">No providers currently excluded.</p>
-        ) : (
-          <div className="space-y-2">
-            {exclusions.map((e) => (
+      {/* ──── CRUD Auto Combos List ──── */}
+      {combos.length > 0 && (
+        <Card className="mb-2">
+          <h2 className="text-lg font-semibold mb-4">Configured Auto-Combos</h2>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {combos.map((combo) => (
               <div
-                key={e.provider}
-                className="p-3 bg-red-50 dark:bg-red-900/10 rounded border border-red-200 dark:border-red-800"
+                key={combo.id}
+                className="p-4 border rounded-lg bg-surface flex justify-between items-center"
               >
-                <div className="flex justify-between">
-                  <span className="font-medium text-red-700 dark:text-red-400">{e.provider}</span>
-                  <span className="text-xs text-gray-500">
-                    Cooldown: {Math.round(e.cooldownMs / 60000)}min
-                  </span>
+                <div>
+                  <h3 className="font-semibold text-text-main flex items-center gap-2">
+                    {combo.name}
+                    <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-500">
+                      {combo.strategy}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-text-muted mt-1">
+                    Pool: {combo.config?.candidatePool?.length || "All"} APIs | Pack:{" "}
+                    {combo.config?.modePack || "fast"}
+                  </p>
                 </div>
-                <p className="text-xs text-gray-500 mt-1">{e.reason}</p>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="secondary" onClick={() => setEditingCombo(combo)}>
+                    Edit
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => handleDelete(combo.id)}>
+                    Delete
+                  </Button>
+                </div>
               </div>
             ))}
           </div>
-        )}
+        </Card>
+      )}
+
+      {/* Forms */}
+      {showCreateModal && (
+        <AutoComboModal
+          isOpen={showCreateModal}
+          onClose={() => setShowCreateModal(false)}
+          onSave={handleCreate}
+          activeProviders={activeProviders}
+          combo={null}
+        />
+      )}
+      {editingCombo && (
+        <AutoComboModal
+          isOpen={!!editingCombo}
+          onClose={() => setEditingCombo(null)}
+          onSave={(data: any) => handleUpdate(editingCombo.id, data)}
+          activeProviders={activeProviders}
+          combo={editingCombo}
+        />
+      )}
+
+      <Card>
+        <div className="flex flex-col md:flex-row gap-6">
+          <div className="flex-1">
+            <h2 className="text-lg font-semibold mb-4">Status Overview</h2>
+            <div className="flex flex-col gap-3">
+              <div
+                className={`p-4 rounded-lg border flex items-center justify-between ${
+                  incidentMode
+                    ? "bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-300"
+                    : "bg-green-500/10 border-green-500/30 text-green-700 dark:text-green-300"
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <span className="material-symbols-outlined text-[24px]">
+                    {incidentMode ? "warning" : "check_circle"}
+                  </span>
+                  <div>
+                    <h3 className="font-semibold">
+                      {incidentMode ? "Incident Mode" : "Normal Operation"}
+                    </h3>
+                    <p className="text-sm opacity-80">
+                      {incidentMode
+                        ? "High circuit breaker trip rate detected"
+                        : "All providers reporting healthy metrics"}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-lg border border-border/50 bg-surface/30 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="material-symbols-outlined text-[24px] text-blue-500">tune</span>
+                  <div>
+                    <h3 className="font-semibold">Active Mode Pack</h3>
+                    <p className="text-sm text-text-muted">
+                      {MODE_PACKS.find((m) => m.id === modePack)?.label || modePack}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex-1">
+            <h2 className="text-lg font-semibold mb-4">Mode Pack</h2>
+            <div className="grid grid-cols-2 gap-2">
+              {MODE_PACKS.map((mp) => (
+                <button
+                  key={mp.id}
+                  onClick={() => setModePack(mp.id)}
+                  className={`flex flex-col items-start p-3 rounded-lg border transition-all ${
+                    modePack === mp.id
+                      ? "border-blue-500/50 bg-blue-500/5 ring-1 ring-blue-500/20"
+                      : "border-border/50 hover:border-border hover:bg-surface/30"
+                  }`}
+                >
+                  <span className={`font-medium ${modePack === mp.id ? "text-blue-500" : ""}`}>
+                    {mp.label}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="p-2 rounded-lg bg-blue-500/10 text-blue-500">
+              <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
+                leaderboard
+              </span>
+            </div>
+            <h3 className="text-lg font-semibold">Provider Scores</h3>
+          </div>
+
+          {scores.length === 0 ? (
+            <p className="text-sm text-text-muted py-4">
+              No auto-combo configured... Create one to see live provider scores.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {scores.map((s) => (
+                <div
+                  key={s.provider}
+                  className="p-3 bg-surface/30 rounded-lg border border-border/50"
+                >
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="font-medium text-sm">
+                      {s.provider} / {s.model}
+                    </span>
+                    <span className="font-bold text-lg text-blue-500">
+                      {(s.score * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                  {/* Score Bar */}
+                  <div className="h-1.5 bg-border/50 rounded-full overflow-hidden mb-3">
+                    <div
+                      className="h-full bg-blue-500 rounded-full transition-all duration-1000"
+                      style={{ width: `${s.score * 100}%` }}
+                    />
+                  </div>
+                  {/* Factor Breakdown */}
+                  <div className="flex flex-wrap gap-2 text-[11px] text-text-muted">
+                    {Object.entries(s.factors || {}).map(([key, val]) => (
+                      <div
+                        key={key}
+                        className="px-2 py-0.5 rounded-full bg-black/5 dark:bg-white/5 border border-border/30"
+                      >
+                        {FACTOR_LABELS[key] || key}:{" "}
+                        <span className="font-medium text-text-main">
+                          {((val as number) * 100).toFixed(0)}%
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <Card>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="p-2 rounded-lg bg-red-500/10 text-red-500">
+              <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
+                block
+              </span>
+            </div>
+            <h3 className="text-lg font-semibold">Excluded Providers</h3>
+          </div>
+
+          {exclusions.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-8 text-text-muted">
+              <span className="material-symbols-outlined text-[32px] mb-2 text-border">
+                verified
+              </span>
+              <p className="text-sm">No providers currently excluded.</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {exclusions.map((e) => (
+                <div
+                  key={e.provider}
+                  className="p-3 bg-red-500/5 rounded-lg border border-red-500/20"
+                >
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-red-600 dark:text-red-400">
+                        {e.provider}
+                      </span>
+                    </div>
+                    <span className="text-xs px-2 py-0.5 rounded bg-red-500/10 text-red-600 dark:text-red-400 font-medium">
+                      Cooldown: {Math.round(e.cooldownMs / 60000)}m
+                    </span>
+                  </div>
+                  <p className="text-xs text-text-muted mt-1.5 flex items-center gap-1">
+                    <span className="material-symbols-outlined text-[12px]">info</span>
+                    {e.reason}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
       </div>
     </div>
   );

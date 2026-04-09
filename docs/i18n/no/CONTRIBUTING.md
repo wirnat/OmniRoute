@@ -1,0 +1,264 @@
+# Contributing to OmniRoute (Norsk)
+
+🌐 **Languages:** 🇺🇸 [English](../../../CONTRIBUTING.md) · 🇪🇸 [es](../es/CONTRIBUTING.md) · 🇫🇷 [fr](../fr/CONTRIBUTING.md) · 🇩🇪 [de](../de/CONTRIBUTING.md) · 🇮🇹 [it](../it/CONTRIBUTING.md) · 🇷🇺 [ru](../ru/CONTRIBUTING.md) · 🇨🇳 [zh-CN](../zh-CN/CONTRIBUTING.md) · 🇯🇵 [ja](../ja/CONTRIBUTING.md) · 🇰🇷 [ko](../ko/CONTRIBUTING.md) · 🇸🇦 [ar](../ar/CONTRIBUTING.md) · 🇮🇳 [hi](../hi/CONTRIBUTING.md) · 🇮🇳 [in](../in/CONTRIBUTING.md) · 🇹🇭 [th](../th/CONTRIBUTING.md) · 🇻🇳 [vi](../vi/CONTRIBUTING.md) · 🇮🇩 [id](../id/CONTRIBUTING.md) · 🇲🇾 [ms](../ms/CONTRIBUTING.md) · 🇳🇱 [nl](../nl/CONTRIBUTING.md) · 🇵🇱 [pl](../pl/CONTRIBUTING.md) · 🇸🇪 [sv](../sv/CONTRIBUTING.md) · 🇳🇴 [no](../no/CONTRIBUTING.md) · 🇩🇰 [da](../da/CONTRIBUTING.md) · 🇫🇮 [fi](../fi/CONTRIBUTING.md) · 🇵🇹 [pt](../pt/CONTRIBUTING.md) · 🇷🇴 [ro](../ro/CONTRIBUTING.md) · 🇭🇺 [hu](../hu/CONTRIBUTING.md) · 🇧🇬 [bg](../bg/CONTRIBUTING.md) · 🇸🇰 [sk](../sk/CONTRIBUTING.md) · 🇺🇦 [uk-UA](../uk-UA/CONTRIBUTING.md) · 🇮🇱 [he](../he/CONTRIBUTING.md) · 🇵🇭 [phi](../phi/CONTRIBUTING.md) · 🇧🇷 [pt-BR](../pt-BR/CONTRIBUTING.md) · 🇨🇿 [cs](../cs/CONTRIBUTING.md) · 🇹🇷 [tr](../tr/CONTRIBUTING.md)
+
+---
+
+Takk for interessen for å bidra! Denne guiden dekker alt du trenger for å komme i gang.---
+
+## Development Setup
+
+### Prerequisites
+
+-**Node.js**>= 18 < 24 (anbefalt: 22 LTS) -**npm**10+ -**Git**### Clone & Install
+
+```bash
+git clone https://github.com/diegosouzapw/OmniRoute.git
+cd OmniRoute
+npm install
+```
+
+### Environment Variables
+
+```bash
+# Create your .env from the template
+cp .env.example .env
+
+# Generate required secrets
+echo "JWT_SECRET=$(openssl rand -base64 48)" >> .env
+echo "API_KEY_SECRET=$(openssl rand -hex 32)" >> .env
+```
+
+Nøkkelvariabler for utvikling:
+
+| Variabel               | Utvikling Standard       | Beskrivelse               |
+| ---------------------- | ------------------------ | ------------------------- | ---------------------- |
+| `PORT`                 | `20128`                  | Serverport                |
+| `NEXT_PUBLIC_BASE_URL` | `http://localhost:20128` | Base-URL for grensesnitt  |
+| `JWT_SECRET`           | (generer ovenfor)        | JWT-signeringshemmelighet |
+| `INITIAL_PASSWORD`     | `ENDRE`                  | Første påloggingspassord  |
+| `APP_LOG_LEVEL`        | `info`                   | Logg detaljeringsnivå     | ### Dashboard Settings |
+
+Dashbordet gir brukergrensesnittbrytere for funksjoner som også kan konfigureres via miljøvariabler:
+
+| Angi plassering          | Veksle              | Beskrivelse                     |
+| ------------------------ | ------------------- | ------------------------------- |
+| Innstillinger → Avansert | Feilsøkingsmodus    | Aktiver debug request logs (UI) |
+| Innstillinger → Generelt | Sidefelts synlighet | Vis/skjul sidefeltseksjoner     |
+
+Disse innstillingene lagres i databasen og vedvarer ved omstart, og overstyrer standardverdier for env var når de er angitt.### Running Locally
+
+```bash
+# Development mode (hot reload)
+npm run dev
+
+# Production build
+npm run build
+npm run start
+
+# Common port configuration
+PORT=20128 NEXT_PUBLIC_BASE_URL=http://localhost:20128 npm run dev
+```
+
+Standard nettadresser:
+
+-**Dashboard**: `http://localhost:20128/dashboard` -**API**: `http://localhost:20128/v1`---
+
+## Git Workflow
+
+> ⚠️**Bli ALDRI direkte til `main`.**Bruk alltid funksjonsgrener.```bash
+> git checkout -b feat/your-feature-name
+
+# ... make changes ...
+
+git commit -m "feat: describe your change"
+git push -u origin feat/your-feature-name
+
+# Open a Pull Request on GitHub
+
+````
+
+### Branch Naming
+
+| Prefiks | Formål |
+| ----------- | -------------------------- |
+| `feat/` | Nye funksjoner |
+| `fix/` | Feilrettinger |
+| `refaktor/` | Kode restrukturering |
+| `docs/` | Dokumentasjonsendringer |
+| `test/` | Testtilføyelser/rettinger |
+| `chore/` | Verktøy, CI, avhengigheter |### Commit Messages
+
+Følg [Conventional Commits](https://www.conventionalcommits.org/):```
+feat: add circuit breaker for provider calls
+fix: resolve JWT secret validation edge case
+docs: update SECURITY.md with PII protection
+test: add observability unit tests
+refactor(db): consolidate rate limit tables
+````
+
+Omfang: "db", "sse", "oauth", "dashboard", "api", "cli", "docker", "ci", "mcp", "a2a", "minne", "ferdigheter".---
+
+## Running Tests
+
+```bash
+# All tests (unit + vitest + ecosystem + e2e)
+npm run test:all
+
+# Single test file (Node.js native test runner — most tests use this)
+node --import tsx/esm --test tests/unit/your-file.test.mjs
+
+# Vitest (MCP server, autoCombo, cache)
+npm run test:vitest
+
+# E2E tests (requires Playwright)
+npm run test:e2e
+
+# Protocol clients E2E (MCP transports, A2A)
+npm run test:protocols:e2e
+
+# Ecosystem compatibility tests
+npm run test:ecosystem
+
+# Coverage (60% min statements/lines/functions/branches)
+npm run test:coverage
+npm run coverage:report
+
+# Lint + format check
+npm run lint
+npm run check
+```
+
+Dekningsnotater:
+
+- `npm run test:coverage` måler kildedekningen for hovedenhetens testsuite, ekskluderer `tests/**` og inkluderer `open-sse/**`
+- Pull-forespørsler må holde den generelle dekningsporten på**60 % eller høyere**for utsagn, linjer, funksjoner og grener
+- Hvis en PR endrer produksjonskode i `src/`, `open-sse/`, `electron/` eller `bin/`, må den legge til eller oppdatere automatiserte tester i samme PR
+- `npm run coverage:report` skriver ut den detaljerte fil-for-fil-rapporten fra den siste dekningskjøringen
+- `npm run test:coverage:legacy` bevarer den eldre beregningen for historisk sammenligning
+- Se `docs/COVERAGE_PLAN.md` for trinnvis dekningsforbedring### Pull Request Requirements
+
+Før du åpner eller slår sammen en PR:
+
+- Kjør `npm run test:unit`
+- Kjør `npm run test:coverage`
+- Sørg for at dekningsporten forblir på**60 %+**for alle beregninger
+- Inkluder de endrede eller tilføyde testfilene i PR-beskrivelsen når produksjonskoden endres
+- Sjekk SonarQube-resultatet på PR når prosjekthemmelighetene er konfigurert i CI
+
+Gjeldende teststatus:**122 enhetstestfiler**som dekker:
+
+- Tilbyder oversettere og formatkonvertering
+- Hastighetsbegrensning, kretsbryter og spenst
+- Semantisk cache, idempotens, fremdriftssporing
+- Databaseoperasjoner og skjema (21 DB-moduler)
+- OAuth-flyter og autentisering
+- API-endepunktvalidering (Zod v4)
+- MCP-serververktøy og håndheving av omfang
+- Minne- og ferdighetssystemer---
+
+## Code Style
+
+-**ESLint**— Kjør `npm run lint` før du forplikter deg -**Penere**— Autoformatert via "lint-staged" på commit (2 mellomrom, semikolon, doble anførselstegn, 100 tegnbredde, es5 etterfølgende kommaer) -**TypeScript**— All `src/`-kode bruker `.ts`/`.tsx`; `open-sse/` bruker `.ts`/`.js`; dokument med TSDoc (`@param`, `@returns`, `@throws`) -**No `eval()`**— ESLint håndhever `no-eval`, `no-implied-eval`, `no-new-func` -**Zod-validering**- Bruk Zod v4-skjemaer for all API-inndatavalidering -**Navngivning**: Files = camelCase/kebab-case, komponenter = PascalCase, konstanter = UPPER_SNAKE---
+
+## Project Structure
+
+```
+src/                        # TypeScript (.ts / .tsx)
+├── app/                    # Next.js 16 App Router
+│   ├── (dashboard)/        # Dashboard pages (23 sections)
+│   ├── api/                # API routes (51 directories)
+│   └── login/              # Auth pages (.tsx)
+├── domain/                 # Policy engine (policyEngine, comboResolver, costRules, etc.)
+├── lib/                    # Core business logic (.ts)
+│   ├── a2a/                # Agent-to-Agent v0.3 protocol server
+│   ├── acp/                # Agent Communication Protocol registry
+│   ├── compliance/         # Compliance policy engine
+│   ├── db/                 # SQLite database layer (21 modules + 16 migrations)
+│   ├── memory/             # Persistent conversational memory
+│   ├── oauth/              # OAuth providers, services, and utilities
+│   ├── skills/             # Extensible skill framework
+│   ├── usage/              # Usage tracking and cost calculation
+│   └── localDb.ts          # Re-export layer only — never add logic here
+├── middleware/              # Request middleware (promptInjectionGuard)
+├── mitm/                   # MITM proxy (cert, DNS, target routing)
+├── shared/
+│   ├── components/         # React components (.tsx)
+│   ├── constants/          # Provider definitions (60+), MCP scopes, routing strategies
+│   ├── utils/              # Circuit breaker, sanitizer, auth helpers
+│   └── validation/         # Zod v4 schemas
+└── sse/                    # SSE proxy pipeline
+
+open-sse/                   # @omniroute/open-sse workspace
+├── executors/              # 14 provider-specific request executors
+├── handlers/               # 11 request handlers (chat, responses, embeddings, images, etc.)
+├── mcp-server/             # MCP server (25 tools, 3 transports, 10 scopes)
+├── services/               # 36+ services (combo, autoCombo, rateLimitManager, etc.)
+├── translator/             # Format translators (OpenAI ↔ Claude ↔ Gemini ↔ Responses ↔ Ollama)
+├── transformer/            # Responses API transformer
+└── utils/                  # 22 utility modules (stream, TLS, proxy, logging)
+
+electron/                   # Electron desktop app (cross-platform)
+
+tests/
+├── unit/                   # Node.js test runner (122 test files)
+├── integration/            # Integration tests
+├── e2e/                    # Playwright tests
+├── security/               # Security tests
+├── translator/             # Translator-specific tests
+└── load/                   # Load tests
+
+docs/                       # Documentation
+├── ARCHITECTURE.md         # System architecture
+├── API_REFERENCE.md        # All endpoints
+├── USER_GUIDE.md           # Provider setup, CLI integration
+├── TROUBLESHOOTING.md      # Common issues
+├── MCP-SERVER.md           # MCP server (25 tools)
+├── A2A-SERVER.md           # A2A agent protocol
+├── AUTO-COMBO.md           # Auto-combo engine
+├── CLI-TOOLS.md            # CLI tools integration
+├── COVERAGE_PLAN.md        # Test coverage improvement plan
+├── openapi.yaml            # OpenAPI specification
+└── adr/                    # Architecture Decision Records
+```
+
+---
+
+## Adding a New Provider
+
+### Step 1: Register Provider Constants
+
+Legg til i `src/shared/constants/providers.ts` — Zod-validert ved modulbelastning.### Step 2: Add Executor (if custom logic needed)
+
+Opprett eksekutør i `open-sse/executors/your-provider.ts` for å utvide baseutføreren.### Step 3: Add Translator (if non-OpenAI format)
+
+Opprett forespørsel/svar-oversettere i `open-sse/translator/`.### Step 4: Add OAuth Config (if OAuth-based)
+
+Legg til OAuth-legitimasjon i `src/lib/oauth/constants/oauth.ts` og service i `src/lib/oauth/services/`.### Step 5: Register Models
+
+Legg til modelldefinisjoner i `open-sse/config/providerRegistry.ts`.### Step 6: Add Tests
+
+Skriv enhetstester i `tester/enhet/` som minimum dekker:
+
+- Leverandørregistrering
+- Forespørsel/svar oversettelse
+- Feilhåndtering---
+
+## Pull Request Checklist
+
+- [ ] Tester bestått (`npm test`)
+- [ ] Linting-pasninger (`npm run lint`)
+- [ ] Bygget lykkes (`npm run build`)
+- [ ] TypeScript-typer lagt til for nye offentlige funksjoner og grensesnitt
+- [ ] Ingen hardkodede hemmeligheter eller reserveverdier
+- [ ] Alle innganger validert med Zod-skjemaer
+- [ ] CHANGELOG oppdatert (hvis brukervendt endring)
+- [ ] Dokumentasjon oppdatert (hvis aktuelt)---
+
+## Releasing
+
+Utgivelser administreres via arbeidsflyten `/generate-release`. Når en ny GitHub-utgivelse er opprettet, blir pakken**automatisk publisert til npm**via GitHub Actions.---
+
+## Getting Help
+
+-**Arkitektur**: Se [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) -**API-referanse**: Se [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) -**Problemer**: [github.com/diegosouzapw/OmniRoute/issues](https://github.com/diegosouzapw/OmniRoute/issues) -**ADRs**: Se `docs/adr/` for arkitektoniske beslutningsposter

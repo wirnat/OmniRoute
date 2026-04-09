@@ -1,5 +1,10 @@
 import { PROVIDERS } from "../config/constants.ts";
 import { getRegistryEntry } from "../config/providerRegistry.ts";
+import {
+  buildClaudeCodeCompatibleHeaders,
+  CLAUDE_CODE_COMPATIBLE_DEFAULT_CHAT_PATH,
+  joinClaudeCodeCompatibleUrl,
+} from "./claudeCodeCompatible.ts";
 
 const OPENAI_COMPATIBLE_PREFIX = "openai-compatible-";
 const OPENAI_COMPATIBLE_DEFAULTS = {
@@ -7,6 +12,7 @@ const OPENAI_COMPATIBLE_DEFAULTS = {
 };
 
 const ANTHROPIC_COMPATIBLE_PREFIX = "anthropic-compatible-";
+const CLAUDE_CODE_COMPATIBLE_PREFIX = "anthropic-compatible-cc-";
 const ANTHROPIC_COMPATIBLE_DEFAULTS = {
   baseUrl: "https://api.anthropic.com/v1",
 };
@@ -19,8 +25,21 @@ function isAnthropicCompatible(provider) {
   return typeof provider === "string" && provider.startsWith(ANTHROPIC_COMPATIBLE_PREFIX);
 }
 
-function getOpenAICompatibleType(provider) {
+export function isClaudeCodeCompatible(provider) {
+  return typeof provider === "string" && provider.startsWith(CLAUDE_CODE_COMPATIBLE_PREFIX);
+}
+
+export function getOpenAICompatibleType(provider, providerSpecificData = null) {
   if (!isOpenAICompatible(provider)) return "chat";
+  const configuredType =
+    providerSpecificData &&
+    typeof providerSpecificData === "object" &&
+    typeof providerSpecificData.apiType === "string"
+      ? providerSpecificData.apiType
+      : null;
+  if (configuredType === "responses" || configuredType === "chat") {
+    return configuredType;
+  }
   return provider.includes("responses") ? "responses" : "chat";
 }
 
@@ -40,6 +59,17 @@ function buildAnthropicCompatibleUrl(baseUrl) {
 // contain max_tokens or Claude model names.
 export function detectFormatFromEndpoint(body, endpointPath = "") {
   const path = String(endpointPath || "");
+  const hasInputField =
+    body &&
+    typeof body === "object" &&
+    Object.prototype.hasOwnProperty.call(body, "input") &&
+    body.input !== undefined;
+  const hasResponsesSpecificFields =
+    body &&
+    typeof body === "object" &&
+    (body.max_output_tokens !== undefined ||
+      body.previous_response_id !== undefined ||
+      body.reasoning !== undefined);
 
   if (/\/responses(?=\/|$)/i.test(path) || /^responses(?=\/|$)/i.test(path)) {
     return "openai-responses";
@@ -49,7 +79,13 @@ export function detectFormatFromEndpoint(body, endpointPath = "") {
     return "claude";
   }
 
-  if (/\/(?:chat\/completions|completions)(?=\/|$)/i.test(path) || /^(?:chat\/completions|completions)(?=\/|$)/i.test(path)) {
+  if (
+    /\/(?:chat\/completions|completions)(?=\/|$)/i.test(path) ||
+    /^(?:chat\/completions|completions)(?=\/|$)/i.test(path)
+  ) {
+    if (hasInputField || hasResponsesSpecificFields) {
+      return "openai-responses";
+    }
     return "openai";
   }
 
@@ -151,9 +187,9 @@ export function detectFormat(body) {
 }
 
 // Get provider config
-export function getProviderConfig(provider) {
+export function getProviderConfig(provider, providerSpecificData = null) {
   if (isOpenAICompatible(provider)) {
-    const apiType = getOpenAICompatibleType(provider);
+    const apiType = getOpenAICompatibleType(provider, providerSpecificData);
     return {
       ...PROVIDERS.openai,
       format: apiType === "responses" ? "openai-responses" : "openai",
@@ -181,15 +217,26 @@ export function buildProviderUrl(
   provider,
   model,
   stream = true,
-  options: { baseUrl?: string; baseUrlIndex?: number } = {}
+  options: {
+    baseUrl?: string;
+    baseUrlIndex?: number;
+    providerSpecificData?: Record<string, unknown> | null;
+  } = {}
 ) {
   if (isOpenAICompatible(provider)) {
-    const apiType = getOpenAICompatibleType(provider);
-    const baseUrl = options?.baseUrl || OPENAI_COMPATIBLE_DEFAULTS.baseUrl;
+    const providerSpecificData = options?.providerSpecificData || null;
+    const apiType = getOpenAICompatibleType(provider, providerSpecificData);
+    const baseUrl =
+      options?.baseUrl ||
+      (typeof providerSpecificData?.baseUrl === "string" ? providerSpecificData.baseUrl : null) ||
+      OPENAI_COMPATIBLE_DEFAULTS.baseUrl;
     return buildOpenAICompatibleUrl(baseUrl, apiType);
   }
   if (isAnthropicCompatible(provider)) {
     const baseUrl = options?.baseUrl || ANTHROPIC_COMPATIBLE_DEFAULTS.baseUrl;
+    if (isClaudeCodeCompatible(provider)) {
+      return joinClaudeCodeCompatibleUrl(baseUrl, CLAUDE_CODE_COMPATIBLE_DEFAULT_CHAT_PATH);
+    }
     return buildAnthropicCompatibleUrl(baseUrl);
   }
 
@@ -220,6 +267,7 @@ export function buildProviderUrl(
 
 // Build provider headers
 export function buildProviderHeaders(provider, credentials, stream = true, body = null) {
+  void body;
   const config = getProviderConfig(provider);
   const entry = getRegistryEntry(provider);
   const headers = {
@@ -229,6 +277,14 @@ export function buildProviderHeaders(provider, credentials, stream = true, body 
 
   // Add auth header
   // Specific override for Anthropic Compatible
+  if (isClaudeCodeCompatible(provider)) {
+    const token = credentials.apiKey || credentials.accessToken || "";
+    return buildClaudeCodeCompatibleHeaders(
+      token,
+      stream,
+      credentials?.providerSpecificData?.ccSessionId
+    );
+  }
   if (isAnthropicCompatible(provider)) {
     if (credentials.apiKey) {
       headers["x-api-key"] = credentials.apiKey;
@@ -284,9 +340,11 @@ export function buildProviderHeaders(provider, credentials, stream = true, body 
 }
 
 // Get target format for provider
-export function getTargetFormat(provider) {
+export function getTargetFormat(provider, providerSpecificData = null) {
   if (isOpenAICompatible(provider)) {
-    return getOpenAICompatibleType(provider) === "responses" ? "openai-responses" : "openai";
+    return getOpenAICompatibleType(provider, providerSpecificData) === "responses"
+      ? "openai-responses"
+      : "openai";
   }
   if (isAnthropicCompatible(provider)) {
     return "claude";

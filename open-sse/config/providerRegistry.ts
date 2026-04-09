@@ -46,7 +46,7 @@ export interface RegistryOAuth {
 
 export interface RegistryEntry {
   id: string;
-  alias: string;
+  alias?: string;
   format: string;
   executor: string;
   baseUrl?: string;
@@ -185,29 +185,16 @@ export const REGISTRY: Record<string, RegistryEntry> = {
     },
     authType: "apikey",
     authHeader: "x-goog-api-key",
-    defaultContextLength: 1000000,
+    defaultContextLength: 1048576,
     oauth: {
       clientIdEnv: "GEMINI_OAUTH_CLIENT_ID",
       clientIdDefault: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
       clientSecretEnv: "GEMINI_OAUTH_CLIENT_SECRET",
-      clientSecretDefault: "",
+      clientSecretDefault: "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",
     },
-    models: [
-      { id: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro High" },
-      { id: "gemini-3.1-pro-low", name: "Gemini 3.1 Pro Low" },
-      { id: "gemini-3.1-pro", name: "Gemini 3.1 Pro" },
-      { id: "gemini-3-1-pro", name: "Gemini 3.1 Pro (Alt ID)" },
-      { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview" },
-      { id: "gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Flash Lite Preview" },
-      { id: "gemini-3-flash-preview", name: "Gemini 3 Flash Preview" },
-      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro" },
-      { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash" },
-      { id: "gemini-2.5-flash-lite", name: "Gemini 2.5 Flash Lite" },
-      { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash" },
-      { id: "gemini-2.0-flash-exp", name: "Gemini 2.0 Flash Exp" },
-      { id: "gemini-1.5-pro", name: "Gemini 1.5 Pro" },
-      { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash" },
-    ],
+    models: [],
+    // Models are populated from Google's API via sync-models (per API key).
+    // No hardcoded fallback — show nothing until a key is added.
   },
 
   "gemini-cli": {
@@ -222,12 +209,12 @@ export const REGISTRY: Record<string, RegistryEntry> = {
     },
     authType: "oauth",
     authHeader: "bearer",
-    defaultContextLength: 1000000,
+    defaultContextLength: 1048576,
     oauth: {
       clientIdEnv: "GEMINI_CLI_OAUTH_CLIENT_ID",
       clientIdDefault: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
       clientSecretEnv: "GEMINI_OAUTH_CLIENT_SECRET",
-      clientSecretDefault: "",
+      clientSecretDefault: "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",
     },
     models: [
       { id: "gemini-3-pro-preview", name: "Gemini 3 Pro Preview" },
@@ -325,19 +312,17 @@ export const REGISTRY: Record<string, RegistryEntry> = {
     alias: "if",
     format: "openai",
     executor: "qoder",
-    baseUrl: "https://apis.qoder.cn/v1/chat/completions",
-    authType: "oauth",
+    baseUrl: "https://api.qoder.com/v1/chat/completions",
+    authType: "apikey",
     authHeader: "bearer",
     headers: {
       "User-Agent": "Qoder-Cli",
     },
     oauth: {
       clientIdEnv: "QODER_OAUTH_CLIENT_ID",
-      clientIdDefault: "10009311001",
       clientSecretEnv: "QODER_OAUTH_CLIENT_SECRET",
-      clientSecretDefault: "",
-      tokenUrl: "https://qoder.cn/oauth/token",
-      authUrl: "https://qoder.cn/oauth",
+      tokenUrl: process.env.QODER_OAUTH_TOKEN_URL || "",
+      authUrl: process.env.QODER_OAUTH_AUTHORIZE_URL || "",
     },
     models: [
       { id: "qoder-rome-30ba3b", name: "Qoder ROME" },
@@ -359,7 +344,7 @@ export const REGISTRY: Record<string, RegistryEntry> = {
 
   antigravity: {
     id: "antigravity",
-    alias: "ag",
+    alias: undefined,
     format: "antigravity",
     executor: "antigravity",
     baseUrls: [
@@ -387,16 +372,11 @@ export const REGISTRY: Record<string, RegistryEntry> = {
     models: [
       { id: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 Thinking" },
       { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
-      { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5" },
-      { id: "claude-sonnet-4", name: "Claude Sonnet 4" },
-      { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview" },
-      { id: "gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Flash Lite Preview" },
-      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro" },
-      { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash" },
-      { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash" },
+      { id: "gemini-3-flash", name: "Gemini 3 Flash" },
+      { id: "gemini-3.1-flash-image", name: "Gemini 3.1 Flash Image" },
+      { id: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro (High)" },
+      { id: "gemini-3.1-pro-low", name: "Gemini 3.1 Pro (Low)" },
       { id: "gpt-oss-120b-medium", name: "GPT OSS 120B Medium" },
-      { id: "gpt-5", name: "GPT 5" },
-      { id: "gpt-5-mini", name: "GPT 5 Mini" },
     ],
     passthroughModels: true,
   },
@@ -444,6 +424,7 @@ export const REGISTRY: Record<string, RegistryEntry> = {
       { id: "claude-opus-4-5-20251101", name: "Claude Opus 4.5 (Full ID)" },
       { id: "claude-sonnet-4", name: "Claude Sonnet 4" },
       { id: "claude-sonnet-4.5", name: "Claude Sonnet 4.5" },
+      { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview" },
       { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro" },
       { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash" },
       { id: "grok-code-fast-1", name: "Grok Code Fast 1" },
@@ -1524,8 +1505,6 @@ export function generateAliasMap(): Record<string, string> {
 const LOCAL_HOSTNAMES = new Set([
   "localhost",
   "127.0.0.1",
-  "::1",
-  "[::1]",
   ...(typeof process !== "undefined" && process.env.LOCAL_HOSTNAMES
     ? process.env.LOCAL_HOSTNAMES.split(",")
         .map((h) => h.trim())
@@ -1544,10 +1523,32 @@ export function isLocalProvider(baseUrl?: string | null): boolean {
   if (!baseUrl) return false;
   try {
     const url = new URL(baseUrl);
-    return LOCAL_HOSTNAMES.has(url.hostname);
+    const hostname = url.hostname;
+    // Strictly matching 172.16.0.0/12 (Docker/local) and explicitly blocking ::1 per SSRF hardening
+    return (
+      LOCAL_HOSTNAMES.has(hostname) ||
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(hostname)
+    );
   } catch {
     return false;
   }
+}
+
+/** Set of provider IDs with passthroughModels enabled — 404s are model-specific, not account-level. */
+const _passthroughProviderIds: Set<string> | null = (() => {
+  try {
+    const ids = new Set<string>();
+    for (const entry of Object.values(REGISTRY)) {
+      if (entry.passthroughModels) ids.add(entry.id);
+    }
+    return ids;
+  } catch {
+    return null;
+  }
+})();
+
+export function getPassthroughProviders(): Set<string> {
+  return _passthroughProviderIds ?? new Set<string>();
 }
 
 // ── Registry Lookup Helpers ───────────────────────────────────────────────

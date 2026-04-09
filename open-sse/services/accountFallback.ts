@@ -36,6 +36,15 @@ export const CREDITS_EXHAUSTED_SIGNALS = [
   "payment required",
 ];
 
+// T11: Signals that indicate OAuth token is invalid/expired (not permanent deactivation)
+export const OAUTH_INVALID_TOKEN_SIGNALS = [
+  "invalid authentication credentials",
+  "oauth 2",
+  "login cookie",
+  "valid authentication credential",
+  "invalid credentials",
+];
+
 /**
  * T06: Returns true if response body indicates the account is permanently deactivated.
  */
@@ -50,6 +59,15 @@ export function isAccountDeactivated(errorText: string): boolean {
 export function isCreditsExhausted(errorText: string): boolean {
   const lower = String(errorText || "").toLowerCase();
   return CREDITS_EXHAUSTED_SIGNALS.some((sig) => lower.includes(sig));
+}
+
+/**
+ * T11: Returns true if response body indicates OAuth token is invalid/expired.
+ * This is different from permanent account deactivation - token refresh can recover.
+ */
+export function isOAuthInvalidToken(errorText: string): boolean {
+  const lower = String(errorText || "").toLowerCase();
+  return OAUTH_INVALID_TOKEN_SIGNALS.some((sig) => lower.includes(sig));
 }
 
 // ─── Provider Profile Helper ────────────────────────────────────────────────
@@ -100,11 +118,47 @@ export function lockModel(provider, connectionId, model, reason, cooldownMs) {
   if (!model) return; // No model → skip model-level locking
   ensureCleanupTimer();
   const key = `${provider}:${connectionId}:${model}`;
+  const newUntil = Date.now() + cooldownMs;
+  // Preserve the longer cooldown if an existing lock has more time remaining.
+  // Safe without a mutex: no await between get/set, so this runs atomically
+  // within Node.js's single-threaded event loop.
+  const existing = modelLockouts.get(key);
+  if (existing && existing.until > newUntil) return;
   modelLockouts.set(key, {
     reason,
-    until: Date.now() + cooldownMs,
+    until: newUntil,
     lockedAt: Date.now(),
   });
+}
+
+/**
+ * Whether a provider should use per-model lockouts instead of connection-wide cooldowns.
+ * Gemini AI Studio has per-model quotas; passthrough providers have independent model limits.
+ */
+export function hasPerModelQuota(provider: string): boolean {
+  if (provider === "gemini") return true;
+  try {
+    const { getPassthroughProviders } = require("../config/providerRegistry.ts");
+    return getPassthroughProviders().has(provider);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Lock a model (not connection) for a provider with per-model quotas.
+ * No-ops for providers that don't use per-model lockouts.
+ */
+export function lockModelIfPerModelQuota(
+  provider: string,
+  connectionId: string,
+  model: string | null,
+  reason: string,
+  cooldownMs: number
+): boolean {
+  if (!hasPerModelQuota(provider) || !model) return false;
+  lockModel(provider, connectionId, model, reason, cooldownMs);
+  return true;
 }
 
 /**

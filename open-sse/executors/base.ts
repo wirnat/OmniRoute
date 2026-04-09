@@ -1,6 +1,7 @@
 import { HTTP_STATUS, FETCH_TIMEOUT_MS } from "../config/constants.ts";
 import { applyFingerprint, isCliCompatEnabled } from "../config/cliFingerprints.ts";
 import { getRotatingApiKey } from "../services/apiKeyRotator.ts";
+import { getOpenAICompatibleType } from "../services/provider.ts";
 
 /**
  * Sanitizes a custom API path to prevent path traversal attacks.
@@ -70,12 +71,41 @@ export function mergeUpstreamExtraHeaders(
   if (!extra) return;
   for (const [k, v] of Object.entries(extra)) {
     if (typeof k === "string" && k.length > 0 && typeof v === "string") {
+      if (k.toLowerCase() === "user-agent") {
+        setUserAgentHeader(headers, v);
+        continue;
+      }
       headers[k] = v;
     }
   }
 }
 
-function mergeAbortSignals(primary: AbortSignal, secondary: AbortSignal): AbortSignal {
+export function getCustomUserAgent(providerSpecificData?: JsonRecord | null): string | null {
+  const customUserAgent =
+    typeof providerSpecificData?.customUserAgent === "string"
+      ? providerSpecificData.customUserAgent.trim()
+      : "";
+  return customUserAgent || null;
+}
+
+export function setUserAgentHeader(headers: Record<string, string>, userAgent: string): void {
+  headers["User-Agent"] = userAgent;
+  if ("user-agent" in headers) {
+    headers["user-agent"] = userAgent;
+  }
+}
+
+export function applyConfiguredUserAgent(
+  headers: Record<string, string>,
+  providerSpecificData?: JsonRecord | null
+): void {
+  const customUserAgent = getCustomUserAgent(providerSpecificData);
+  if (customUserAgent) {
+    setUserAgentHeader(headers, customUserAgent);
+  }
+}
+
+export function mergeAbortSignals(primary: AbortSignal, secondary: AbortSignal): AbortSignal {
   const controller = new AbortController();
 
   const abortBoth = () => {
@@ -136,7 +166,10 @@ export class BaseExecutor {
       const rawPath = typeof psd?.chatPath === "string" && psd.chatPath ? psd.chatPath : null;
       const customPath = rawPath && sanitizePath(rawPath) ? rawPath : null;
       if (customPath) return `${normalized}${customPath}`;
-      const path = this.provider.includes("responses") ? "/responses" : "/chat/completions";
+      const path =
+        getOpenAICompatibleType(this.provider, psd) === "responses"
+          ? "/responses"
+          : "/chat/completions";
       return `${normalized}${path}`;
     }
     const baseUrls = this.getBaseUrls();
@@ -156,9 +189,7 @@ export class BaseExecutor {
       const envKey = `${providerId.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_USER_AGENT`;
       const envUA = process.env[envKey]?.trim();
       if (envUA) {
-        // Override both common casing variants
-        headers["User-Agent"] = envUA;
-        if (headers["user-agent"]) headers["user-agent"] = envUA;
+        setUserAgentHeader(headers, envUA);
       }
     }
 
@@ -238,6 +269,7 @@ export class BaseExecutor {
     for (let urlIndex = 0; urlIndex < fallbackCount; urlIndex++) {
       const url = this.buildUrl(model, stream, urlIndex, credentials);
       const headers = this.buildHeaders(credentials, stream);
+      applyConfiguredUserAgent(headers, credentials?.providerSpecificData);
 
       // Append 1M context beta header when [1m] suffix was used
       // Only supported for specific Claude models per Anthropic docs
@@ -261,7 +293,7 @@ export class BaseExecutor {
         }
       }
 
-      const transformedBody = this.transformRequest(model, body, stream, credentials);
+      const transformedBody = await this.transformRequest(model, body, stream, credentials);
 
       try {
         // Apply timeout to all requests. Non-streaming requests need this to prevent

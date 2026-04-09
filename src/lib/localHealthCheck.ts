@@ -31,6 +31,7 @@ const BACKOFF_SCHEDULE = [30_000, 60_000, 120_000, 300_000];
 const CHECK_TIMEOUT_MS = 5_000;
 const INITIAL_DELAY_MS = 15_000; // Wait for server boot before first sweep
 const LOG_PREFIX = "[LocalHealthCheck]";
+const TRUE_ENV_VALUES = new Set(["1", "true", "yes", "on"]);
 
 // ── State (globalThis survives HMR re-evaluation) ───────────────────────
 
@@ -61,6 +62,16 @@ const healthCache = getLHCState().healthCache;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+function isEnvFlagEnabled(name: string): boolean {
+  const value = process.env[name];
+  if (!value) return false;
+  return TRUE_ENV_VALUES.has(value.trim().toLowerCase());
+}
+
+function isLocalHealthCheckDisabled(): boolean {
+  return isEnvFlagEnabled("OMNIROUTE_DISABLE_LOCAL_HEALTHCHECK") || process.env.NODE_ENV === "test";
+}
+
 function isLocalhostUrl(baseUrl: string): boolean {
   try {
     const u = new URL(baseUrl);
@@ -68,11 +79,11 @@ function isLocalhostUrl(baseUrl: string): boolean {
     if (u.username || u.password) return false;
     // Note: URL.hostname returns "[::1]" WITH brackets for IPv6 — both forms checked.
     // Verified: node -e "new URL('http://[::1]:8080').hostname" → "[::1]"
+    // Strictly matching 172.16.0.0/12 (Docker/local) and explicitly blocking ::1 per SSRF hardening
     return (
       u.hostname === "localhost" ||
       u.hostname === "127.0.0.1" ||
-      u.hostname === "::1" ||
-      u.hostname === "[::1]"
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(u.hostname)
     );
   } catch {
     return false;
@@ -212,7 +223,7 @@ export function getAllHealthStatuses(): Record<string, HealthStatus> {
 /** Start the health check scheduler (idempotent). */
 export function initLocalHealthCheck(): void {
   const state = getLHCState();
-  if (state.initialized) return;
+  if (state.initialized || isLocalHealthCheckDisabled()) return;
   state.initialized = true;
 
   console.log(

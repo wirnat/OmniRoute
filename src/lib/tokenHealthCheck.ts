@@ -10,7 +10,12 @@
  * updates the DB, and logs the result.
  */
 
-import { getProviderConnections, updateProviderConnection, getSettings } from "@/lib/localDb";
+import {
+  getProviderConnections,
+  updateProviderConnection,
+  getSettings,
+  resolveProxyForConnection,
+} from "@/lib/localDb";
 import {
   getAccessToken,
   supportsTokenRefresh,
@@ -126,10 +131,16 @@ export function initTokenHealthCheck() {
 
   log(`${LOG_PREFIX} Starting proactive token health-check (tick every ${TICK_MS / 1000}s)`);
 
-  setTimeout(() => {
+  const timer = setTimeout(() => {
     sweep();
     state.interval = setInterval(sweep, TICK_MS);
+    if (state.interval && typeof state.interval === "object" && "unref" in state.interval) {
+      (state.interval as { unref?: () => void }).unref?.();
+    }
   }, 10_000);
+  if (timer && typeof timer === "object" && "unref" in timer) {
+    (timer as { unref?: () => void }).unref?.();
+  }
 }
 
 /**
@@ -222,17 +233,23 @@ async function checkConnection(conn) {
   };
 
   const hideLogs = await shouldHideLogs();
-  const result = await getAccessToken(conn.provider, credentials, {
-    info: (tag, msg) => {
-      if (!hideLogs) console.log(`${LOG_PREFIX} [${tag}] ${msg}`);
+  const proxyConfig = await resolveProxyForConnection(conn.id);
+  const result = await getAccessToken(
+    conn.provider,
+    credentials,
+    {
+      info: (tag, msg) => {
+        if (!hideLogs) console.log(`${LOG_PREFIX} [${tag}] ${msg}`);
+      },
+      warn: (tag, msg) => {
+        if (!hideLogs) console.warn(`${LOG_PREFIX} [${tag}] ${msg}`);
+      },
+      error: (tag, msg, extra) => {
+        if (!hideLogs) console.error(`${LOG_PREFIX} [${tag}] ${msg}`, extra || "");
+      },
     },
-    warn: (tag, msg) => {
-      if (!hideLogs) console.warn(`${LOG_PREFIX} [${tag}] ${msg}`);
-    },
-    error: (tag, msg, extra) => {
-      if (!hideLogs) console.error(`${LOG_PREFIX} [${tag}] ${msg}`, extra || "");
-    },
-  });
+    proxyConfig
+  );
 
   const now = new Date().toISOString();
 
@@ -280,6 +297,13 @@ async function checkConnection(conn) {
 
     if (result.expiresIn) {
       updateData.tokenExpiresAt = new Date(Date.now() + result.expiresIn * 1000).toISOString();
+    }
+
+    if (result.providerSpecificData) {
+      updateData.providerSpecificData = {
+        ...(conn.providerSpecificData || {}),
+        ...result.providerSpecificData,
+      };
     }
 
     await updateProviderConnection(conn.id, updateData);

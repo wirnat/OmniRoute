@@ -29,8 +29,14 @@ import {
   getProviderAlias,
   isOpenAICompatibleProvider,
   isAnthropicCompatibleProvider,
+  isClaudeCodeCompatibleProvider,
+  supportsApiKeyOnFreeProvider,
 } from "@/shared/constants/providers";
 import { getModelsByProviderId } from "@/shared/constants/models";
+import {
+  compatibleProviderSupportsModelImport,
+  getCompatibleFallbackModels,
+} from "@/lib/providers/managedAvailableModels";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import {
   MODEL_COMPAT_PROTOCOL_KEYS,
@@ -333,6 +339,7 @@ interface CompatibleModelsSectionProps {
   providerDisplayAlias: string;
   modelAliases: Record<string, string>;
   fallbackModels?: CompatModelRow[];
+  allowImport: boolean;
   description: string;
   inputLabel: string;
   inputPlaceholder: string;
@@ -383,6 +390,7 @@ interface ConnectionRowConnection {
   globalPriority?: number;
   providerSpecificData?: Record<string, unknown>;
   expiresAt?: string;
+  tokenExpiresAt?: string;
 }
 
 interface ConnectionRowProps {
@@ -420,6 +428,7 @@ interface AddApiKeyModalProps {
   providerName?: string;
   isCompatible?: boolean;
   isAnthropic?: boolean;
+  isCcCompatible?: boolean;
   onSave: (data: {
     name: string;
     apiKey: string;
@@ -463,7 +472,12 @@ interface EditCompatibleNodeModalProps {
   onSave: (data: unknown) => Promise<void>;
   onClose: () => void;
   isAnthropic?: boolean;
+  isCcCompatible?: boolean;
 }
+
+const CC_COMPATIBLE_LABEL = "CC Compatible";
+const CC_COMPATIBLE_DETAILS_TITLE = "CC Compatible Details";
+const CC_COMPATIBLE_DEFAULT_CHAT_PATH = "/v1/messages?beta=true";
 
 function normalizeCodexLimitPolicy(policy: unknown): { use5h: boolean; useWeekly: boolean } {
   const record =
@@ -515,7 +529,8 @@ function ModelCompatPopover({
   const ref = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [portalPanelRect, setPortalPanelRect] = useState<{
-    top: number;
+    top?: number;
+    bottom?: number;
     left: number;
     width: number;
   } | null>(null);
@@ -607,7 +622,16 @@ function ModelCompatPopover({
     const width = Math.min(window.innerWidth - 2 * margin, 24 * 16);
     let left = rect.right - width;
     left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
-    setPortalPanelRect({ top: rect.bottom + 8, left, width });
+    // Estimated panel height: capped at min(82vh, 42rem=672px)
+    const estimatedPanelHeight = Math.min(window.innerHeight * 0.82, 672);
+    const spaceBelow = window.innerHeight - rect.bottom - margin;
+    const spaceAbove = rect.top - margin;
+    if (spaceBelow < estimatedPanelHeight && spaceAbove > spaceBelow) {
+      // Not enough space below — open upward
+      setPortalPanelRect({ bottom: window.innerHeight - rect.top + 8, left, width });
+    } else {
+      setPortalPanelRect({ top: rect.bottom + 8, left, width });
+    }
   }, [open]);
 
   useLayoutEffect(() => {
@@ -648,7 +672,9 @@ function ModelCompatPopover({
             className={panelChromeClass}
             style={{
               position: "fixed",
-              top: portalPanelRect.top,
+              ...(portalPanelRect.top !== undefined
+                ? { top: portalPanelRect.top }
+                : { bottom: portalPanelRect.bottom }),
               left: portalPanelRect.left,
               width: portalPanelRect.width,
               zIndex: 10040,
@@ -827,20 +853,37 @@ export default function ProviderDetailPage() {
     customModels: CompatModelRow[];
     modelCompatOverrides: Array<CompatModelRow & { id: string }>;
   }>({ customModels: [], modelCompatOverrides: [] });
+  const [syncedAvailableModels, setSyncedAvailableModels] = useState<any[]>([]);
   const [compatSavingModelId, setCompatSavingModelId] = useState<string | null>(null);
   const [applyingCodexAuthId, setApplyingCodexAuthId] = useState<string | null>(null);
   const [exportingCodexAuthId, setExportingCodexAuthId] = useState<string | null>(null);
+  const isOpenAICompatible = isOpenAICompatibleProvider(providerId);
+  const isCcCompatible = isClaudeCodeCompatibleProvider(providerId);
+  const isAnthropicCompatible =
+    isAnthropicCompatibleProvider(providerId) && !isClaudeCodeCompatibleProvider(providerId);
+  const isCompatible = isOpenAICompatible || isAnthropicCompatible || isCcCompatible;
+  const isAnthropicProtocolCompatible = isAnthropicCompatible || isCcCompatible;
 
   const providerInfo = providerNode
     ? {
         id: providerNode.id,
         name:
           providerNode.name ||
-          (providerNode.type === "anthropic-compatible"
-            ? t("anthropicCompatibleName")
-            : t("openaiCompatibleName")),
-        color: providerNode.type === "anthropic-compatible" ? "#D97757" : "#10A37F",
-        textIcon: providerNode.type === "anthropic-compatible" ? "AC" : "OC",
+          (isCcCompatible
+            ? CC_COMPATIBLE_LABEL
+            : providerNode.type === "anthropic-compatible"
+              ? t("anthropicCompatibleName")
+              : t("openaiCompatibleName")),
+        color: isCcCompatible
+          ? "#B45309"
+          : providerNode.type === "anthropic-compatible"
+            ? "#D97757"
+            : "#10A37F",
+        textIcon: isCcCompatible
+          ? "CC"
+          : providerNode.type === "anthropic-compatible"
+            ? "AC"
+            : "OC",
         apiType: providerNode.apiType,
         baseUrl: providerNode.baseUrl,
         type: providerNode.type,
@@ -848,15 +891,17 @@ export default function ProviderDetailPage() {
     : (FREE_PROVIDERS as any)[providerId] ||
       (OAUTH_PROVIDERS as any)[providerId] ||
       (APIKEY_PROVIDERS as any)[providerId];
-  const isOAuth = !!(FREE_PROVIDERS as any)[providerId] || !!(OAUTH_PROVIDERS as any)[providerId];
-  const models = getModelsByProviderId(providerId);
+  const providerSupportsOAuth =
+    !!(FREE_PROVIDERS as any)[providerId] || !!(OAUTH_PROVIDERS as any)[providerId];
+  const providerSupportsPat = supportsApiKeyOnFreeProvider(providerId);
+  const isOAuth = providerSupportsOAuth && !providerSupportsPat;
+  const registryModels = getModelsByProviderId(providerId);
+  // For Gemini: always use synced API models (empty if no keys added yet)
+  const models = providerId === "gemini" ? syncedAvailableModels : registryModels;
   const providerAlias = getProviderAlias(providerId);
-
-  const isOpenAICompatible = isOpenAICompatibleProvider(providerId);
-  const isAnthropicCompatible = isAnthropicCompatibleProvider(providerId);
-  const isCompatible = isOpenAICompatible || isAnthropicCompatible;
   const isManagedAvailableModelsProvider = isCompatible || providerId === "openrouter";
   const isSearchProvider = providerId.endsWith("-search");
+  const compatibleSupportsModelImport = compatibleProviderSupportsModelImport(providerId);
 
   const providerStorageAlias = isCompatible ? providerId : providerAlias;
   const providerDisplayAlias = isCompatible ? providerNode?.prefix || providerId : providerAlias;
@@ -886,6 +931,20 @@ export default function ProviderDetailPage() {
         customModels: data.models || [],
         modelCompatOverrides: data.modelCompatOverrides || [],
       });
+      // Fetch synced available models for Gemini
+      if (providerId === "gemini") {
+        try {
+          const syncRes = await fetch("/api/synced-available-models?provider=gemini", {
+            cache: "no-store",
+          });
+          if (syncRes.ok) {
+            const syncData = await syncRes.json();
+            setSyncedAvailableModels(syncData.models || []);
+          }
+        } catch {
+          // Non-critical
+        }
+      }
     } catch (e) {
       console.error("fetchProviderModelMeta", e);
     }
@@ -1031,6 +1090,10 @@ export default function ProviderDetailPage() {
       const res = await fetch(`/api/providers/${id}`, { method: "DELETE" });
       if (res.ok) {
         setConnections(connections.filter((c) => c.id !== id));
+        // Refresh model list after connection deletion (synced models may change)
+        if (providerId === "gemini") {
+          await fetchProviderModelMeta();
+        }
       }
     } catch (error) {
       console.log("Error deleting connection:", error);
@@ -1042,6 +1105,14 @@ export default function ProviderDetailPage() {
     setShowOAuthModal(false);
   }, [fetchConnections]);
 
+  const openPrimaryAddFlow = useCallback(() => {
+    if (isOAuth) {
+      setShowOAuthModal(true);
+      return;
+    }
+    setShowAddApiKeyModal(true);
+  }, [isOAuth]);
+
   const handleSaveApiKey = async (formData) => {
     try {
       const res = await fetch("/api/providers", {
@@ -1050,8 +1121,72 @@ export default function ProviderDetailPage() {
         body: JSON.stringify({ provider: providerId, ...formData }),
       });
       if (res.ok) {
+        const connectionData = await res.json();
+        const newConnection = connectionData?.connection;
         await fetchConnections();
         setShowAddApiKeyModal(false);
+
+        // For Gemini: show progress dialog and sync models from endpoint
+        if (providerId === "gemini" && newConnection?.id) {
+          setShowImportModal(true);
+          setImportProgress({
+            current: 0,
+            total: 0,
+            phase: "fetching",
+            status: t("fetchingModels"),
+            logs: [],
+            error: "",
+            importedCount: 0,
+          });
+
+          try {
+            const syncRes = await fetch(`/api/providers/${newConnection.id}/sync-models`, {
+              method: "POST",
+              signal: AbortSignal.timeout(30_000), // 30s timeout — model sync shouldn't hang
+            });
+            const syncData = await syncRes.json();
+
+            if (!syncRes.ok || syncData.error) {
+              setImportProgress((prev) => ({
+                ...prev,
+                phase: "error",
+                status: t("failedFetchModels"),
+                error: syncData.error?.message || syncData.error || t("failedImportModels"),
+              }));
+              return null;
+            }
+
+            const syncedCount = syncData.syncedModels || 0;
+            const syncedModelList: Array<{ id: string; name?: string }> = syncData.models || [];
+            const logs: string[] = [];
+            if (syncedModelList.length > 0) {
+              logs.push(`✓ ${syncedCount} models available`);
+              logs.push("");
+              for (const m of syncedModelList) {
+                logs.push(`  ${m.name || m.id}`);
+              }
+            }
+
+            setImportProgress((prev) => ({
+              ...prev,
+              phase: "done",
+              status: t("modelsImported", { count: syncedCount }),
+              total: syncedCount,
+              current: syncedCount,
+              importedCount: syncedCount,
+              logs,
+            }));
+
+            await fetchProviderModelMeta();
+          } catch (syncError) {
+            setImportProgress((prev) => ({
+              ...prev,
+              phase: "error",
+              status: t("failedFetchModels"),
+              error: String(syncError),
+            }));
+          }
+        }
         return null;
       }
       const data = await res.json().catch(() => ({}));
@@ -1716,6 +1851,10 @@ export default function ProviderDetailPage() {
     () => buildCompatMap(modelMeta.modelCompatOverrides),
     [modelMeta.modelCompatOverrides]
   );
+  const compatibleFallbackModels = useMemo(
+    () => getCompatibleFallbackModels(providerId, modelMeta.customModels),
+    [providerId, modelMeta.customModels]
+  );
 
   const effectiveModelNormalize = (modelId: string, protocol = MODEL_COMPAT_PROTOCOL_KEYS[0]) =>
     effectiveNormalizeForProtocol(modelId, protocol, customMap, overrideMap);
@@ -1802,7 +1941,7 @@ export default function ProviderDetailPage() {
   };
 
   const renderModelsSection = () => {
-    const autoSyncToggle = canImportModels && (
+    const autoSyncToggle = compatibleSupportsModelImport && canImportModels && (
       <button
         onClick={handleToggleAutoSync}
         disabled={togglingAutoSync}
@@ -1836,16 +1975,20 @@ export default function ProviderDetailPage() {
       const description =
         providerId === "openrouter"
           ? t("openRouterAnyModelHint")
-          : t("compatibleModelsDescription", {
-              type: isAnthropicCompatible ? t("anthropic") : t("openai"),
-            });
+          : isCcCompatible
+            ? "CC Compatible available models mirror the OAuth Claude Code provider list."
+            : t("compatibleModelsDescription", {
+                type: isAnthropicCompatible ? t("anthropic") : t("openai"),
+              });
       const inputLabel = providerId === "openrouter" ? t("modelIdFromOpenRouter") : t("modelId");
       const inputPlaceholder =
         providerId === "openrouter"
           ? t("openRouterModelPlaceholder")
-          : isAnthropicCompatible
-            ? t("anthropicCompatibleModelPlaceholder")
-            : t("openaiCompatibleModelPlaceholder");
+          : isCcCompatible
+            ? "claude-sonnet-4-6"
+            : isAnthropicCompatible
+              ? t("anthropicCompatibleModelPlaceholder")
+              : t("openaiCompatibleModelPlaceholder");
 
       return (
         <div>
@@ -1857,7 +2000,7 @@ export default function ProviderDetailPage() {
             providerStorageAlias={providerStorageAlias}
             providerDisplayAlias={providerDisplayAlias}
             modelAliases={modelAliases}
-            fallbackModels={providerId === "openrouter" ? modelMeta.customModels : undefined}
+            fallbackModels={compatibleFallbackModels}
             description={description}
             inputLabel={inputLabel}
             inputPlaceholder={inputPlaceholder}
@@ -1866,7 +2009,7 @@ export default function ProviderDetailPage() {
             onSetAlias={handleSetAlias}
             onDeleteAlias={handleDeleteAlias}
             connections={connections}
-            isAnthropic={isAnthropicCompatible}
+            isAnthropic={isAnthropicProtocolCompatible}
             onImportWithProgress={handleCompatibleImportWithProgress}
             t={t}
             effectiveModelNormalize={effectiveModelNormalize}
@@ -1875,6 +2018,7 @@ export default function ProviderDetailPage() {
             saveModelCompatFlags={saveModelCompatFlags}
             compatSavingModelId={compatSavingModelId}
             onModelsChanged={fetchProviderModelMeta}
+            allowImport={compatibleSupportsModelImport}
           />
         </div>
       );
@@ -1917,23 +2061,24 @@ export default function ProviderDetailPage() {
       );
     }
 
-    const importButton = (
-      <div className="flex items-center gap-2 mb-4">
-        <Button
-          size="sm"
-          variant="secondary"
-          icon="download"
-          onClick={handleImportModels}
-          disabled={!canImportModels || importingModels}
-        >
-          {importingModels ? t("importingModels") : t("importFromModels")}
-        </Button>
-        {autoSyncToggle}
-        {!canImportModels && (
-          <span className="text-xs text-text-muted">{t("addConnectionToImport")}</span>
-        )}
-      </div>
-    );
+    const importButton =
+      providerId === "gemini" ? null : (
+        <div className="flex items-center gap-2 mb-4">
+          <Button
+            size="sm"
+            variant="secondary"
+            icon="download"
+            onClick={handleImportModels}
+            disabled={!canImportModels || importingModels}
+          >
+            {importingModels ? t("importingModels") : t("importFromModels")}
+          </Button>
+          {autoSyncToggle}
+          {!canImportModels && (
+            <span className="text-xs text-text-muted">{t("addConnectionToImport")}</span>
+          )}
+        </div>
+      );
 
     if (models.length === 0) {
       return (
@@ -1997,7 +2142,7 @@ export default function ProviderDetailPage() {
         ? "/providers/oai-r.png"
         : "/providers/oai-cc.png";
     }
-    if (isAnthropicCompatible) {
+    if (isAnthropicProtocolCompatible) {
       return "/providers/anthropic-m.png";
     }
     return `/providers/${providerInfo.id}.png`;
@@ -2062,22 +2207,26 @@ export default function ProviderDetailPage() {
           <div className="flex items-center justify-between mb-4">
             <div>
               <h2 className="text-lg font-semibold">
-                {isAnthropicCompatible
-                  ? t("anthropicCompatibleDetails")
-                  : t("openaiCompatibleDetails")}
+                {isCcCompatible
+                  ? CC_COMPATIBLE_DETAILS_TITLE
+                  : isAnthropicCompatible
+                    ? t("anthropicCompatibleDetails")
+                    : t("openaiCompatibleDetails")}
               </h2>
               <p className="text-sm text-text-muted">
-                {isAnthropicCompatible
+                {isAnthropicProtocolCompatible
                   ? t("messagesApi")
                   : providerNode.apiType === "responses"
                     ? t("responsesApi")
                     : t("chatCompletions")}{" "}
                 · {(providerNode.baseUrl || "").replace(/\/$/, "")}/
-                {isAnthropicCompatible
-                  ? t("messagesPath")
-                  : providerNode.apiType === "responses"
-                    ? t("responsesPath")
-                    : t("chatCompletionsPath")}
+                {isCcCompatible
+                  ? (providerNode.chatPath || CC_COMPATIBLE_DEFAULT_CHAT_PATH).replace(/^\//, "")
+                  : isAnthropicCompatible
+                    ? (providerNode.chatPath || "/messages").replace(/^\//, "")
+                    : providerNode.apiType === "responses"
+                      ? (providerNode.chatPath || "/responses").replace(/^\//, "")
+                      : (providerNode.chatPath || "/chat/completions").replace(/^\//, "")}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -2105,7 +2254,11 @@ export default function ProviderDetailPage() {
                   if (
                     !confirm(
                       t("deleteCompatibleNodeConfirm", {
-                        type: isAnthropicCompatible ? t("anthropic") : t("openai"),
+                        type: isCcCompatible
+                          ? CC_COMPATIBLE_LABEL
+                          : isAnthropicCompatible
+                            ? t("anthropic")
+                            : t("openai"),
                       })
                     )
                   )
@@ -2184,13 +2337,16 @@ export default function ProviderDetailPage() {
             </button>
           )}
           {!isCompatible ? (
-            <Button
-              size="sm"
-              icon="add"
-              onClick={() => (isOAuth ? setShowOAuthModal(true) : setShowAddApiKeyModal(true))}
-            >
-              {t("add")}
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button size="sm" icon="add" onClick={openPrimaryAddFlow}>
+                {providerSupportsPat ? "Add PAT" : t("add")}
+              </Button>
+              {providerId === "qoder" && (
+                <Button size="sm" variant="secondary" onClick={() => setShowOAuthModal(true)}>
+                  Experimental OAuth
+                </Button>
+              )}
+            </div>
           ) : (
             connections.length === 0 && (
               <Button size="sm" icon="add" onClick={() => setShowAddApiKeyModal(true)}>
@@ -2210,12 +2366,16 @@ export default function ProviderDetailPage() {
             <p className="text-text-main font-medium mb-1">{t("noConnectionsYet")}</p>
             <p className="text-sm text-text-muted mb-4">{t("addFirstConnectionHint")}</p>
             {!isCompatible && (
-              <Button
-                icon="add"
-                onClick={() => (isOAuth ? setShowOAuthModal(true) : setShowAddApiKeyModal(true))}
-              >
-                {t("addConnection")}
-              </Button>
+              <div className="flex items-center justify-center gap-2">
+                <Button icon="add" onClick={openPrimaryAddFlow}>
+                  {providerSupportsPat ? "Add PAT" : t("addConnection")}
+                </Button>
+                {providerId === "qoder" && (
+                  <Button variant="secondary" onClick={() => setShowOAuthModal(true)}>
+                    Experimental OAuth
+                  </Button>
+                )}
+              </div>
             )}
           </div>
         ) : (
@@ -2232,7 +2392,7 @@ export default function ProviderDetailPage() {
                     <ConnectionRow
                       key={conn.id}
                       connection={conn}
-                      isOAuth={isOAuth}
+                      isOAuth={conn.authType === "oauth"}
                       isFirst={index === 0}
                       isLast={index === sorted.length - 1}
                       onMoveUp={() => handleSwapPriority(conn, sorted[index - 1])}
@@ -2253,8 +2413,12 @@ export default function ProviderDetailPage() {
                         setShowEditModal(true);
                       }}
                       onDelete={() => handleDelete(conn.id)}
-                      onReauth={isOAuth ? () => setShowOAuthModal(true) : undefined}
-                      onRefreshToken={isOAuth ? () => handleRefreshToken(conn.id) : undefined}
+                      onReauth={
+                        conn.authType === "oauth" ? () => setShowOAuthModal(true) : undefined
+                      }
+                      onRefreshToken={
+                        conn.authType === "oauth" ? () => handleRefreshToken(conn.id) : undefined
+                      }
                       isRefreshing={refreshingId === conn.id}
                       onApplyCodexAuthLocal={
                         providerId === "codex"
@@ -2329,7 +2493,7 @@ export default function ProviderDetailPage() {
                           <ConnectionRow
                             key={conn.id}
                             connection={conn}
-                            isOAuth={isOAuth}
+                            isOAuth={conn.authType === "oauth"}
                             isFirst={gi === 0 && index === 0}
                             isLast={gi === groupKeys.length - 1 && index === groupConns.length - 1}
                             onMoveUp={() =>
@@ -2356,8 +2520,14 @@ export default function ProviderDetailPage() {
                               setShowEditModal(true);
                             }}
                             onDelete={() => handleDelete(conn.id)}
-                            onReauth={isOAuth ? () => setShowOAuthModal(true) : undefined}
-                            onRefreshToken={isOAuth ? () => handleRefreshToken(conn.id) : undefined}
+                            onReauth={
+                              conn.authType === "oauth" ? () => setShowOAuthModal(true) : undefined
+                            }
+                            onRefreshToken={
+                              conn.authType === "oauth"
+                                ? () => handleRefreshToken(conn.id)
+                                : undefined
+                            }
                             isRefreshing={refreshingId === conn.id}
                             onApplyCodexAuthLocal={
                               providerId === "codex"
@@ -2400,7 +2570,7 @@ export default function ProviderDetailPage() {
           {renderModelsSection()}
 
           {/* Custom Models — available for providers without managed available-model metadata */}
-          {!isManagedAvailableModelsProvider && (
+          {!isManagedAvailableModelsProvider && providerId !== "gemini" && (
             <CustomModelsSection
               providerId={providerId}
               providerAlias={providerDisplayAlias}
@@ -2466,7 +2636,8 @@ export default function ProviderDetailPage() {
         provider={providerId}
         providerName={providerInfo.name}
         isCompatible={isCompatible}
-        isAnthropic={isAnthropicCompatible}
+        isAnthropic={isAnthropicProtocolCompatible}
+        isCcCompatible={isCcCompatible}
         onSave={handleSaveApiKey}
         onClose={() => setShowAddApiKeyModal(false)}
       />
@@ -2482,7 +2653,8 @@ export default function ProviderDetailPage() {
           node={providerNode}
           onSave={handleUpdateNode}
           onClose={() => setShowEditNodeModal(false)}
-          isAnthropic={isAnthropicCompatible}
+          isAnthropic={isAnthropicProtocolCompatible}
+          isCcCompatible={isCcCompatible}
         />
       )}
       {/* Batch Test Results Modal */}
@@ -2687,11 +2859,16 @@ export default function ProviderDetailPage() {
             </div>
           )}
 
-          {/* Auto-reload notice */}
-          {importProgress.phase === "done" && importProgress.importedCount > 0 && (
-            <p className="text-xs text-text-muted text-center animate-pulse">
-              {t("pageAutoRefresh")}
-            </p>
+          {/* Close button */}
+          {importProgress.phase === "done" && (
+            <div className="flex justify-center">
+              <button
+                onClick={() => setShowImportModal(false)}
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-primary text-white hover:opacity-90 transition-opacity"
+              >
+                {t("close") || "Close"}
+              </button>
+            </div>
           )}
         </div>
       </Modal>
@@ -2785,11 +2962,15 @@ function PassthroughModelsSection({
     (model as string).startsWith(`${providerAlias}/`)
   );
 
-  const allModels = providerAliases.map(([alias, fullModel]: [string, any]) => ({
-    modelId: (fullModel as string).replace(`${providerAlias}/`, ""),
-    fullModel,
-    alias,
-  }));
+  const allModels = providerAliases.map(([alias, fullModel]: [string, any]) => {
+    const fmStr = fullModel as string;
+    const prefix = `${providerAlias}/`;
+    return {
+      modelId: fmStr.startsWith(prefix) ? fmStr.slice(prefix.length) : fmStr,
+      fullModel,
+      alias,
+    };
+  });
 
   // Generate default alias from modelId (last part after /)
   const generateDefaultAlias = (modelId) => {
@@ -3460,6 +3641,7 @@ function CompatibleModelsSection({
   saveModelCompatFlags,
   compatSavingModelId,
   onModelsChanged,
+  allowImport,
 }: CompatibleModelsSectionProps) {
   const [newModel, setNewModel] = useState("");
   const [adding, setAdding] = useState(false);
@@ -3475,10 +3657,14 @@ function CompatibleModelsSection({
   );
 
   const allModels = useMemo(() => {
-    const rows = providerAliases.map(([alias, fullModel]: [string, any]) => ({
-      modelId: (fullModel as string).replace(`${providerStorageAlias}/`, ""),
-      alias,
-    }));
+    const rows = providerAliases.map(([alias, fullModel]: [string, any]) => {
+      const fmStr = fullModel as string;
+      const prefix = `${providerStorageAlias}/`;
+      return {
+        modelId: fmStr.startsWith(prefix) ? fmStr.slice(prefix.length) : fmStr,
+        alias,
+      };
+    });
 
     const seenModelIds = new Set(rows.map((row) => row.modelId));
     for (const model of fallbackModels) {
@@ -3548,7 +3734,7 @@ function CompatibleModelsSection({
   };
 
   const handleImport = async () => {
-    if (importing) return;
+    if (!allowImport || importing) return;
     const activeConnection = connections.find((conn) => conn.isActive !== false);
     if (!activeConnection) return;
 
@@ -3651,18 +3837,22 @@ function CompatibleModelsSection({
         <Button size="sm" icon="add" onClick={handleAdd} disabled={!newModel.trim() || adding}>
           {adding ? t("adding") : t("add")}
         </Button>
-        <Button
-          size="sm"
-          variant="secondary"
-          icon="download"
-          onClick={handleImport}
-          disabled={!canImport || importing}
-        >
-          {importing ? t("importingModels") : t("importFromModels")}
-        </Button>
+        {allowImport && (
+          <Button
+            size="sm"
+            variant="secondary"
+            icon="download"
+            onClick={handleImport}
+            disabled={!canImport || importing}
+          >
+            {importing ? t("importingModels") : t("importFromModels")}
+          </Button>
+        )}
       </div>
 
-      {!canImport && <p className="text-xs text-text-muted">{t("addConnectionToImport")}</p>}
+      {allowImport && !canImport && (
+        <p className="text-xs text-text-muted">{t("addConnectionToImport")}</p>
+      )}
 
       {allModels.length > 0 && (
         <div className="flex flex-col gap-3">
@@ -3716,6 +3906,7 @@ CompatibleModelsSection.propTypes = {
   saveModelCompatFlags: PropTypes.func.isRequired,
   compatSavingModelId: PropTypes.string,
   onModelsChanged: PropTypes.func,
+  allowImport: PropTypes.bool.isRequired,
 };
 
 function CooldownTimer({ until }: CooldownTimerProps) {
@@ -3988,22 +4179,25 @@ function ConnectionRow({
   const [isCooldown, setIsCooldown] = useState(false);
   // T12: token expiry status — lazy init avoids calling Date.now() during render;
   // updates every 30s via interval only (no sync setState in effect body).
+  // Prefer tokenExpiresAt (updated on each refresh) over expiresAt (original grant date).
+  const effectiveExpiresAt = connection.tokenExpiresAt || connection.expiresAt;
   const getTokenMinsLeft = () => {
-    if (!isOAuth || !connection.expiresAt) return null;
-    const expiresMs = new Date(connection.expiresAt).getTime();
+    if (!isOAuth || !effectiveExpiresAt) return null;
+    const expiresMs = new Date(effectiveExpiresAt).getTime();
     return Math.floor((expiresMs - Date.now()) / 60000);
   };
   const [tokenMinsLeft, setTokenMinsLeft] = useState<number | null>(getTokenMinsLeft);
 
   useEffect(() => {
-    if (!isOAuth || !connection.expiresAt) return;
+    if (!isOAuth || !effectiveExpiresAt) return;
     const update = () => {
-      const expiresMs = new Date(connection.expiresAt).getTime();
+      const expiresMs = new Date(effectiveExpiresAt).getTime();
       setTokenMinsLeft(Math.floor((expiresMs - Date.now()) / 60000));
     };
+    update();
     const iv = setInterval(update, 30000);
     return () => clearInterval(iv);
-  }, [isOAuth, connection.expiresAt]);
+  }, [isOAuth, effectiveExpiresAt]);
 
   useEffect(() => {
     const checkCooldown = () => {
@@ -4075,7 +4269,7 @@ function ConnectionRow({
               (tokenMinsLeft < 0 ? (
                 <span
                   className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-xs font-medium bg-red-500/15 text-red-500"
-                  title={`Token expired: ${connection.expiresAt}`}
+                  title={`Token expired: ${effectiveExpiresAt}`}
                 >
                   <span className="material-symbols-outlined text-[11px]">error</span>
                   expired
@@ -4100,9 +4294,10 @@ function ConnectionRow({
             {connection.lastError && connection.isActive !== false && (
               <span
                 className={`text-xs truncate max-w-[300px] ${statusPresentation.errorTextClass}`}
-                title={connection.lastError.replace(/<[^>]*>?/gm, "")}
-                dangerouslySetInnerHTML={{ __html: connection.lastError }}
-              />
+                title={connection.lastError.replace(/[<>]/g, "")}
+              >
+                {connection.lastError.replace(/[<>]/g, "")}
+              </span>
             )}
             <span className="text-xs text-text-muted">#{connection.priority}</span>
             {connection.globalPriority && (
@@ -4332,6 +4527,7 @@ function AddApiKeyModal({
   providerName,
   isCompatible,
   isAnthropic,
+  isCcCompatible,
   onSave,
   onClose,
 }: AddApiKeyModalProps) {
@@ -4341,6 +4537,7 @@ function AddApiKeyModal({
   const isVertex = provider === "vertex";
   const defaultRegion = "us-central1";
   const isGlm = provider === "glm";
+  const isQoder = provider === "qoder";
 
   const [formData, setFormData] = useState({
     name: "",
@@ -4350,11 +4547,13 @@ function AddApiKeyModal({
     region: isVertex ? defaultRegion : "",
     apiRegion: "international",
     validationModelId: "",
+    customUserAgent: "",
   });
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const handleValidate = async () => {
     setValidating(true);
@@ -4367,6 +4566,7 @@ function AddApiKeyModal({
           provider,
           apiKey: formData.apiKey,
           validationModelId: formData.validationModelId || undefined,
+          customUserAgent: formData.customUserAgent.trim() || undefined,
         }),
       });
       const data = await res.json();
@@ -4405,6 +4605,7 @@ function AddApiKeyModal({
             provider,
             apiKey: formData.apiKey,
             validationModelId: formData.validationModelId || undefined,
+            customUserAgent: formData.customUserAgent.trim() || undefined,
           }),
         });
         const data = await res.json();
@@ -4421,28 +4622,26 @@ function AddApiKeyModal({
         return;
       }
 
+      const providerSpecificData: Record<string, unknown> = {};
+      if (formData.customUserAgent.trim()) {
+        providerSpecificData.customUserAgent = formData.customUserAgent.trim();
+      }
+      if (isBailian) {
+        providerSpecificData.baseUrl = validatedBailianBaseUrl;
+      } else if (isVertex) {
+        providerSpecificData.region = formData.region;
+      } else if (isGlm) {
+        providerSpecificData.apiRegion = formData.apiRegion;
+      }
+
       const payload = {
         name: formData.name,
         apiKey: formData.apiKey,
         priority: formData.priority,
         testStatus: "active",
-        providerSpecificData: undefined,
+        providerSpecificData:
+          Object.keys(providerSpecificData).length > 0 ? providerSpecificData : undefined,
       };
-
-      // Include baseUrl in providerSpecificData for bailian-coding-plan
-      if (isBailian) {
-        payload.providerSpecificData = {
-          baseUrl: validatedBailianBaseUrl,
-        };
-      } else if (isVertex) {
-        payload.providerSpecificData = {
-          region: formData.region,
-        };
-      } else if (isGlm) {
-        payload.providerSpecificData = {
-          apiRegion: formData.apiRegion,
-        };
-      }
 
       const error = await onSave(payload);
       if (error) {
@@ -4466,16 +4665,27 @@ function AddApiKeyModal({
           label={t("nameLabel")}
           value={formData.name}
           onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-          placeholder={t("productionKey")}
+          placeholder={isQoder ? "Qoder PAT" : t("productionKey")}
         />
         <div className="flex gap-2">
           <Input
-            label={t("apiKeyLabel")}
+            label={isQoder ? "Personal Access Token" : t("apiKeyLabel")}
             type="password"
             value={formData.apiKey}
             onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
             className="flex-1"
-            placeholder={isVertex ? "Cole o Service Account JSON aqui" : undefined}
+            placeholder={
+              isVertex
+                ? "Cole o Service Account JSON aqui"
+                : isQoder
+                  ? "Paste your Qoder Personal Access Token"
+                  : undefined
+            }
+            hint={
+              isQoder
+                ? "Supported path: PAT via qodercli. Browser OAuth remains experimental."
+                : undefined
+            }
           />
           <div className="pt-6">
             <Button
@@ -4499,14 +4709,45 @@ function AddApiKeyModal({
         )}
         {isCompatible && (
           <p className="text-xs text-text-muted">
-            {isAnthropic
-              ? t("validationChecksAnthropicCompatible", {
-                  provider: providerName || t("anthropicCompatibleName"),
-                })
-              : t("validationChecksOpenAiCompatible", {
-                  provider: providerName || t("openaiCompatibleName"),
-                })}
+            {isCcCompatible
+              ? "Validation uses the strict Claude Code-compatible bridge request for this provider."
+              : isAnthropic
+                ? t("validationChecksAnthropicCompatible", {
+                    provider: providerName || t("anthropicCompatibleName"),
+                  })
+                : t("validationChecksOpenAiCompatible", {
+                    provider: providerName || t("openaiCompatibleName"),
+                  })}
           </p>
+        )}
+        <button
+          type="button"
+          className="text-sm text-text-muted hover:text-text-primary flex items-center gap-1"
+          onClick={() => setShowAdvanced(!showAdvanced)}
+          aria-expanded={showAdvanced}
+          aria-controls="add-api-key-advanced-settings"
+        >
+          <span
+            className={`transition-transform ${showAdvanced ? "rotate-90" : ""}`}
+            aria-hidden="true"
+          >
+            ▶
+          </span>
+          {t("advancedSettings")}
+        </button>
+        {showAdvanced && (
+          <div
+            id="add-api-key-advanced-settings"
+            className="flex flex-col gap-3 pl-2 border-l-2 border-border"
+          >
+            <Input
+              label="Custom User-Agent"
+              value={formData.customUserAgent}
+              onChange={(e) => setFormData({ ...formData, customUserAgent: e.target.value })}
+              placeholder="my-app/1.0"
+              hint="Optional override sent upstream as the User-Agent header for this connection"
+            />
+          </div>
         )}
         <Input
           label="Model ID (opcional)"
@@ -4580,6 +4821,7 @@ AddApiKeyModal.propTypes = {
   providerName: PropTypes.string,
   isCompatible: PropTypes.bool,
   isAnthropic: PropTypes.bool,
+  isCcCompatible: PropTypes.bool,
   onSave: PropTypes.func.isRequired,
   onClose: PropTypes.func.isRequired,
 };
@@ -4609,6 +4851,7 @@ function EditConnectionModal({ isOpen, connection, onSave, onClose }: EditConnec
     apiRegion: "international",
     validationModelId: "",
     tag: "",
+    customUserAgent: "",
   });
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
@@ -4618,6 +4861,7 @@ function EditConnectionModal({ isOpen, connection, onSave, onClose }: EditConnec
   const [saveError, setSaveError] = useState<string | null>(null);
   const [extraApiKeys, setExtraApiKeys] = useState<string[]>([]);
   const [newExtraKey, setNewExtraKey] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const isBailian = connection?.provider === "bailian-coding-plan";
   const defaultBailianUrl = "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1";
@@ -4631,6 +4875,9 @@ function EditConnectionModal({ isOpen, connection, onSave, onClose }: EditConnec
       const existingBaseUrl = typeof rawBaseUrl === "string" ? rawBaseUrl : "";
       const rawRegion = connection.providerSpecificData?.region;
       const existingRegion = typeof rawRegion === "string" ? rawRegion : "";
+      const rawCustomUserAgent = connection.providerSpecificData?.customUserAgent;
+      const existingCustomUserAgent =
+        typeof rawCustomUserAgent === "string" ? rawCustomUserAgent : "";
       setFormData({
         name: connection.name || "",
         priority: connection.priority || 1,
@@ -4641,16 +4888,18 @@ function EditConnectionModal({ isOpen, connection, onSave, onClose }: EditConnec
         apiRegion: (connection.providerSpecificData?.apiRegion as string) || "international",
         validationModelId: (connection.providerSpecificData?.validationModelId as string) || "",
         tag: (connection.providerSpecificData?.tag as string) || "",
+        customUserAgent: existingCustomUserAgent,
       });
       // Load existing extra keys from providerSpecificData
       const existing = connection.providerSpecificData?.extraApiKeys;
       setExtraApiKeys(Array.isArray(existing) ? existing : []);
       setNewExtraKey("");
+      setShowAdvanced(!!existingCustomUserAgent);
       setTestResult(null);
       setValidationResult(null);
       setSaveError(null);
     }
-  }, [connection, isBailian]);
+  }, [connection, isBailian, isVertex]);
 
   const handleTest = async () => {
     if (!connection?.provider) return;
@@ -4693,6 +4942,7 @@ function EditConnectionModal({ isOpen, connection, onSave, onClose }: EditConnec
           provider: connection.provider,
           apiKey: formData.apiKey,
           validationModelId: formData.validationModelId || undefined,
+          customUserAgent: formData.customUserAgent.trim() || undefined,
         }),
       });
       const data = await res.json();
@@ -4738,6 +4988,7 @@ function EditConnectionModal({ isOpen, connection, onSave, onClose }: EditConnec
                 provider: connection.provider,
                 apiKey: formData.apiKey,
                 validationModelId: formData.validationModelId || undefined,
+                customUserAgent: formData.customUserAgent.trim() || undefined,
               }),
             });
             const data = await res.json();
@@ -4765,6 +5016,7 @@ function EditConnectionModal({ isOpen, connection, onSave, onClose }: EditConnec
           ...(connection.providerSpecificData || {}),
           extraApiKeys: extraApiKeys.filter((k) => k.trim().length > 0),
           tag: formData.tag.trim() || undefined,
+          customUserAgent: formData.customUserAgent.trim(),
         };
         if (formData.validationModelId) {
           updates.providerSpecificData.validationModelId = formData.validationModelId;
@@ -4878,6 +5130,35 @@ function EditConnectionModal({ isOpen, connection, onSave, onClose }: EditConnec
             {saveError && (
               <div className="text-sm text-red-500 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
                 {saveError}
+              </div>
+            )}
+            <button
+              type="button"
+              className="text-sm text-text-muted hover:text-text-primary flex items-center gap-1"
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              aria-expanded={showAdvanced}
+              aria-controls="edit-connection-advanced-settings"
+            >
+              <span
+                className={`transition-transform ${showAdvanced ? "rotate-90" : ""}`}
+                aria-hidden="true"
+              >
+                ▶
+              </span>
+              {t("advancedSettings")}
+            </button>
+            {showAdvanced && (
+              <div
+                id="edit-connection-advanced-settings"
+                className="flex flex-col gap-3 pl-2 border-l-2 border-border"
+              >
+                <Input
+                  label="Custom User-Agent"
+                  value={formData.customUserAgent}
+                  onChange={(e) => setFormData({ ...formData, customUserAgent: e.target.value })}
+                  placeholder="my-app/1.0"
+                  hint="Optional override sent upstream as the User-Agent header for this connection"
+                />
               </div>
             )}
             <Input
@@ -5041,6 +5322,7 @@ function EditCompatibleNodeModal({
   onSave,
   onClose,
   isAnthropic,
+  isCcCompatible,
 }: EditCompatibleNodeModalProps) {
   const t = useTranslations("providers");
   const [formData, setFormData] = useState({
@@ -5065,13 +5347,23 @@ function EditCompatibleNodeModal({
         apiType: node.apiType || "chat",
         baseUrl:
           node.baseUrl ||
-          (isAnthropic ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1"),
-        chatPath: node.chatPath || "",
-        modelsPath: node.modelsPath || "",
+          (isCcCompatible
+            ? "https://api.anthropic.com"
+            : isAnthropic
+              ? "https://api.anthropic.com/v1"
+              : "https://api.openai.com/v1"),
+        chatPath: node.chatPath || (isCcCompatible ? CC_COMPATIBLE_DEFAULT_CHAT_PATH : ""),
+        modelsPath: isCcCompatible ? "" : node.modelsPath || "",
       });
-      setShowAdvanced(!!(node.chatPath || node.modelsPath));
+      setShowAdvanced(
+        !!(
+          node.chatPath ||
+          (!isCcCompatible && node.modelsPath) ||
+          (isCcCompatible && !node.chatPath)
+        )
+      );
     }
-  }, [node, isAnthropic]);
+  }, [node, isAnthropic, isCcCompatible]);
 
   const apiTypeOptions = [
     { value: "chat", label: t("chatCompletions") },
@@ -5086,8 +5378,8 @@ function EditCompatibleNodeModal({
         name: formData.name,
         prefix: formData.prefix,
         baseUrl: formData.baseUrl,
-        chatPath: formData.chatPath || "",
-        modelsPath: formData.modelsPath || "",
+        chatPath: formData.chatPath || (isCcCompatible ? CC_COMPATIBLE_DEFAULT_CHAT_PATH : ""),
+        modelsPath: isCcCompatible ? "" : formData.modelsPath,
       };
       if (!isAnthropic) {
         payload.apiType = formData.apiType;
@@ -5108,7 +5400,9 @@ function EditCompatibleNodeModal({
           baseUrl: formData.baseUrl,
           apiKey: checkKey,
           type: isAnthropic ? "anthropic-compatible" : "openai-compatible",
-          modelsPath: formData.modelsPath || "",
+          compatMode: isCcCompatible ? "cc" : undefined,
+          chatPath: formData.chatPath || (isCcCompatible ? CC_COMPATIBLE_DEFAULT_CHAT_PATH : ""),
+          modelsPath: isCcCompatible ? "" : formData.modelsPath,
         }),
       });
       const data = await res.json();
@@ -5125,25 +5419,39 @@ function EditCompatibleNodeModal({
   return (
     <Modal
       isOpen={isOpen}
-      title={t("editCompatibleTitle", { type: isAnthropic ? t("anthropic") : t("openai") })}
+      title={
+        isCcCompatible
+          ? CC_COMPATIBLE_DETAILS_TITLE
+          : t("editCompatibleTitle", { type: isAnthropic ? t("anthropic") : t("openai") })
+      }
       onClose={onClose}
     >
       <div className="flex flex-col gap-4">
         <Input
-          label={t("nameLabel")}
+          label={isCcCompatible ? "Name" : t("nameLabel")}
           value={formData.name}
           onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-          placeholder={t("compatibleProdPlaceholder", {
-            type: isAnthropic ? t("anthropic") : t("openai"),
-          })}
-          hint={t("nameHint")}
+          placeholder={
+            isCcCompatible
+              ? "CC Compatible Production"
+              : t("compatibleProdPlaceholder", {
+                  type: isAnthropic ? t("anthropic") : t("openai"),
+                })
+          }
+          hint={isCcCompatible ? "Display name for this provider" : t("nameHint")}
         />
         <Input
-          label={t("prefixLabel")}
+          label={isCcCompatible ? "Prefix" : t("prefixLabel")}
           value={formData.prefix}
           onChange={(e) => setFormData({ ...formData, prefix: e.target.value })}
-          placeholder={isAnthropic ? t("anthropicPrefixPlaceholder") : t("openaiPrefixPlaceholder")}
-          hint={t("prefixHint")}
+          placeholder={
+            isCcCompatible
+              ? "cc"
+              : isAnthropic
+                ? t("anthropicPrefixPlaceholder")
+                : t("openaiPrefixPlaceholder")
+          }
+          hint={isCcCompatible ? "Used for aliases such as prefix/model-id" : t("prefixHint")}
         />
         {!isAnthropic && (
           <Select
@@ -5154,15 +5462,23 @@ function EditCompatibleNodeModal({
           />
         )}
         <Input
-          label={t("baseUrlLabel")}
+          label={isCcCompatible ? "Base URL" : t("baseUrlLabel")}
           value={formData.baseUrl}
           onChange={(e) => setFormData({ ...formData, baseUrl: e.target.value })}
           placeholder={
-            isAnthropic ? t("anthropicBaseUrlPlaceholder") : t("openaiBaseUrlPlaceholder")
+            isCcCompatible
+              ? "https://example.com/v1"
+              : isAnthropic
+                ? t("anthropicBaseUrlPlaceholder")
+                : t("openaiBaseUrlPlaceholder")
           }
-          hint={t("compatibleBaseUrlHint", {
-            type: isAnthropic ? t("anthropic") : t("openai"),
-          })}
+          hint={
+            isCcCompatible
+              ? "Base URL for the CC-compatible site. Do not include /messages."
+              : t("compatibleBaseUrlHint", {
+                  type: isAnthropic ? t("anthropic") : t("openai"),
+                })
+          }
         />
         <button
           type="button"
@@ -5182,19 +5498,31 @@ function EditCompatibleNodeModal({
         {showAdvanced && (
           <div id="advanced-settings" className="flex flex-col gap-3 pl-2 border-l-2 border-border">
             <Input
-              label={t("chatPathLabel")}
+              label={isCcCompatible ? "Chat Path" : t("chatPathLabel")}
               value={formData.chatPath}
               onChange={(e) => setFormData({ ...formData, chatPath: e.target.value })}
-              placeholder={isAnthropic ? "/messages" : t("chatPathPlaceholder")}
-              hint={t("chatPathHint")}
+              placeholder={
+                isCcCompatible
+                  ? CC_COMPATIBLE_DEFAULT_CHAT_PATH
+                  : isAnthropic
+                    ? "/messages"
+                    : t("chatPathPlaceholder")
+              }
+              hint={
+                isCcCompatible
+                  ? "Defaults to the strict Claude Code-compatible messages path"
+                  : t("chatPathHint")
+              }
             />
-            <Input
-              label={t("modelsPathLabel")}
-              value={formData.modelsPath}
-              onChange={(e) => setFormData({ ...formData, modelsPath: e.target.value })}
-              placeholder={t("modelsPathPlaceholder")}
-              hint={t("modelsPathHint")}
-            />
+            {!isCcCompatible && (
+              <Input
+                label={t("modelsPathLabel")}
+                value={formData.modelsPath}
+                onChange={(e) => setFormData({ ...formData, modelsPath: e.target.value })}
+                placeholder={t("modelsPathPlaceholder")}
+                hint={t("modelsPathHint")}
+              />
+            )}
           </div>
         )}
         <div className="flex gap-2">
@@ -5253,4 +5581,5 @@ EditCompatibleNodeModal.propTypes = {
   onSave: PropTypes.func.isRequired,
   onClose: PropTypes.func.isRequired,
   isAnthropic: PropTypes.bool,
+  isCcCompatible: PropTypes.bool,
 };

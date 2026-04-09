@@ -16,6 +16,10 @@ export const updateSettingsSchema = z.object({
   requireLogin: z.boolean().optional(),
   enableSocks5Proxy: z.boolean().optional(),
   instanceName: z.string().max(100).optional(),
+  customLogoUrl: z.string().max(2000).optional(),
+  customLogoBase64: z.string().max(100000).optional(),
+  customFaviconUrl: z.string().max(2000).optional(),
+  customFaviconBase64: z.string().max(50000).optional(),
   corsOrigins: z.string().max(500).optional(),
   cloudUrl: z.string().max(500).optional(),
   baseUrl: z.string().max(500).optional(),
@@ -49,6 +53,9 @@ export const updateSettingsSchema = z.object({
   alwaysPreserveClientCache: z.enum(["auto", "always", "never"]).optional(),
   // Adaptive Volume Routing
   adaptiveVolumeRouting: z.boolean().optional(),
+  // Usage token buffer — safety margin added to reported prompt/input token counts.
+  // Prevents CLI tools from overrunning context windows. Set to 0 to disable.
+  usageTokenBuffer: z.number().int().min(0).max(50000).optional(),
   // Custom CLI agent definitions for ACP
   customAgents: z
     .array(
@@ -63,4 +70,9 @@ export const updateSettingsSchema = z.object({
       })
     )
     .optional(),
+  // SkillsMP marketplace API key
+  skillsmpApiKey: z.string().max(200).optional(),
+  // models.dev sync settings
+  modelsDevSyncEnabled: z.boolean().optional(),
+  modelsDevSyncInterval: z.number().int().min(3600).max(604800).optional(),
 });

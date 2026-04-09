@@ -59,8 +59,18 @@ export const qwen = {
       }
     }
 
+    if (!email && tokens.access_token) {
+      try {
+        const decodedToken = decodeJwt(tokens.access_token);
+        email = decodedToken.email || decodedToken.preferred_username || decodedToken.sub || null;
+        displayName = decodedToken.name || email;
+      } catch (e) {
+        // Ignore
+      }
+    }
+
     return {
-      accessToken: tokens.id_token || tokens.access_token,
+      accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       expiresIn: tokens.expires_in,
       idToken: tokens.id_token,

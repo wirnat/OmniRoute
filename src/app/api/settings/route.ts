@@ -8,6 +8,7 @@ import { updateSettingsSchema } from "@/shared/validation/settingsSchemas";
 import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
 import { setCliCompatProviders } from "../../../../open-sse/config/cliFingerprints";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
+import { validateProxyUrl, upsertUpstreamProxyConfig } from "@/lib/db/upstreamProxy";
 
 export async function GET() {
   try {
@@ -42,6 +43,12 @@ export async function GET() {
 export async function PATCH(request) {
   try {
     const rawBody = await request.json();
+
+    // Capture old settings BEFORE update for comparison (needed for models.dev sync toggle)
+    const oldSettings =
+      "modelsDevSyncEnabled" in rawBody || "modelsDevSyncInterval" in rawBody
+        ? await getSettings()
+        : null;
 
     // Zod validation
     const validation = validateBody(updateSettingsSchema, rawBody);
@@ -102,6 +109,36 @@ export async function PATCH(request) {
 
     const settings = await updateSettings(body);
 
+    // Sync CLIProxyAPI settings to upstream_proxy_config table
+    const cpaUrl = rawBody.cliproxyapi_url as string | undefined;
+    const cpaFallback = rawBody.cliproxyapi_fallback_enabled as boolean | undefined;
+    if (cpaUrl && typeof cpaUrl === "string") {
+      const urlValidation = validateProxyUrl(cpaUrl);
+      if (urlValidation.valid === false) {
+        return NextResponse.json(
+          { error: `Invalid CLIProxyAPI URL: ${urlValidation.error}` },
+          { status: 400 }
+        );
+      }
+    }
+    // Sync usage token buffer to runtime cache
+    if ("usageTokenBuffer" in body) {
+      const { invalidateBufferTokensCache } =
+        await import("@omniroute/open-sse/utils/usageTracking.ts");
+      invalidateBufferTokensCache();
+    }
+
+    if (cpaFallback !== undefined || cpaUrl !== undefined) {
+      const enabled =
+        cpaFallback ?? (settings as Record<string, unknown>).cliproxyapi_fallback_enabled;
+      const mode = enabled ? "fallback" : "native";
+      await upsertUpstreamProxyConfig({
+        providerId: "cliproxyapi",
+        mode,
+        enabled: !!enabled,
+      });
+    }
+
     // Clear health check log cache if that setting was updated
     if ("hideHealthCheckLogs" in body) {
       clearHealthCheckLogCache();
@@ -116,6 +153,26 @@ export async function PATCH(request) {
     if ("alwaysPreserveClientCache" in body) {
       const { invalidateCacheControlSettingsCache } = await import("@/lib/cacheControlSettings");
       invalidateCacheControlSettingsCache();
+    }
+
+    // Sync models.dev sync settings (compare old vs new state)
+    if (oldSettings && ("modelsDevSyncEnabled" in body || "modelsDevSyncInterval" in body)) {
+      const { stopPeriodicSync, startPeriodicSync } = await import("@/lib/modelsDevSync");
+      const wasEnabled = (oldSettings as Record<string, unknown>).modelsDevSyncEnabled === true;
+      const isEnabled = settings.modelsDevSyncEnabled === true;
+      const oldInterval = (oldSettings as Record<string, unknown>).modelsDevSyncInterval as
+        | number
+        | undefined;
+      const newInterval = settings.modelsDevSyncInterval as number | undefined;
+
+      if (wasEnabled && !isEnabled) {
+        stopPeriodicSync();
+      } else if (!wasEnabled && isEnabled) {
+        startPeriodicSync(newInterval);
+      } else if (isEnabled && oldInterval !== newInterval) {
+        stopPeriodicSync();
+        startPeriodicSync(newInterval);
+      }
     }
 
     const { password, ...safeSettings } = settings;

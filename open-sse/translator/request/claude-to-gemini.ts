@@ -92,9 +92,6 @@ export function claudeToGeminiRequest(model, body, stream) {
               break;
 
             case "tool_use":
-              // Do NOT include thoughtSignature on functionCall parts — it is only valid
-              // on thinking/reasoning parts and causes HTTP 400 "invalid argument" from the
-              // Gemini API when present on a functionCall part.
               parts.push({
                 functionCall: {
                   id: block.id,
@@ -147,6 +144,24 @@ export function claudeToGeminiRequest(model, body, stream) {
       if (parts.length > 0) {
         // Map Claude roles to Gemini roles
         const geminiRole = msg.role === "assistant" ? "model" : "user";
+
+        // Gemini 3+ expects the signature on the first functionCall part in a tool-call
+        // batch. If the assistant turn had no explicit thinking block, inject a fallback
+        // signature into that first functionCall. (#927)
+        if (geminiRole === "model") {
+          const hasFunctionCall = parts.some((p) => p.functionCall);
+          const hasSignature = parts.some((p) => p.thoughtSignature);
+          if (hasFunctionCall && !hasSignature) {
+            const fcIndex = parts.findIndex((p) => p.functionCall);
+            if (fcIndex >= 0) {
+              parts[fcIndex] = {
+                ...parts[fcIndex],
+                thoughtSignature: DEFAULT_THINKING_GEMINI_SIGNATURE,
+              };
+            }
+          }
+        }
+
         result.contents.push({ role: geminiRole, parts });
       }
     }
@@ -175,7 +190,7 @@ export function claudeToGeminiRequest(model, body, stream) {
   if (body.thinking?.type === "enabled" && body.thinking.budget_tokens) {
     result.generationConfig.thinkingConfig = {
       thinkingBudget: body.thinking.budget_tokens,
-      include_thoughts: true,
+      includeThoughts: true,
     };
   }
 

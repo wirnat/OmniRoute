@@ -1,150 +1,231 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
 
-// ═══════════════════════════════════════════════════════════════
-//  QoderExecutor Unit Tests
-//  Tests for HMAC-SHA256 signature, headers, URL building
-//  Fixes: https://github.com/diegosouzapw/OmniRoute/issues/114
-// ═══════════════════════════════════════════════════════════════
+import { QoderExecutor } from "../../open-sse/executors/qoder.ts";
+import {
+  buildQoderPrompt,
+  getStaticQoderModels,
+  mapQoderModelToLevel,
+  normalizeQoderPatProviderData,
+  parseQoderCliFailure,
+  validateQoderCliPat,
+} from "../../open-sse/services/qoderCli.ts";
 
-const { QoderExecutor } = await import("../../open-sse/executors/qoder.ts");
-
-// ─── Constructor ──────────────────────────────────────────────
-
-test("QoderExecutor: constructor sets provider to 'qoder'", () => {
+test("QoderExecutor: constructor sets provider to qoder", () => {
   const executor = new QoderExecutor();
   assert.equal(executor.getProvider(), "qoder");
 });
 
-// ─── createQoderSignature ─────────────────────────────────────
-
-test("QoderExecutor: createQoderSignature returns valid HMAC-SHA256 hex", () => {
+test("QoderExecutor: buildHeaders inherits configured user agent, auth and stream headers", () => {
   const executor = new QoderExecutor();
-  const userAgent = "Qoder-Cli";
-  const sessionID = "session-test-123";
-  const timestamp = 1700000000000;
-  const apiKey = "test-api-key-secret";
 
-  const signature = executor.createQoderSignature(userAgent, sessionID, timestamp, apiKey);
-
-  // Verify it's a valid hex string (64 chars for SHA256)
-  assert.match(signature, /^[0-9a-f]{64}$/);
-
-  // Verify reproducibility — same inputs produce same signature
-  const signature2 = executor.createQoderSignature(userAgent, sessionID, timestamp, apiKey);
-  assert.equal(signature, signature2);
-
-  // Verify against manual HMAC computation
-  const payload = `${userAgent}:${sessionID}:${timestamp}`;
-  const expected = crypto.createHmac("sha256", apiKey).update(payload).digest("hex");
-  assert.equal(signature, expected);
+  assert.deepEqual(executor.buildHeaders({ apiKey: "pat" }, true), {
+    "Content-Type": "application/json",
+    "User-Agent": "Qoder-Cli",
+    Authorization: "Bearer pat",
+    Accept: "text/event-stream",
+  });
+  assert.deepEqual(executor.buildHeaders({ accessToken: "token" }, false), {
+    "Content-Type": "application/json",
+    "User-Agent": "Qoder-Cli",
+    Authorization: "Bearer token",
+  });
 });
 
-test("QoderExecutor: createQoderSignature returns empty string when apiKey is empty", () => {
+test("QoderExecutor: buildUrl uses the live qoder.com API base", () => {
   const executor = new QoderExecutor();
-  const result = executor.createQoderSignature("agent", "session", 123, "");
-  assert.equal(result, "");
-});
-
-test("QoderExecutor: createQoderSignature returns empty string when apiKey is null", () => {
-  const executor = new QoderExecutor();
-  const result = executor.createQoderSignature("agent", "session", 123, null);
-  assert.equal(result, "");
-});
-
-// ─── buildHeaders ─────────────────────────────────────────────
-
-test("QoderExecutor: buildHeaders includes qoder-specific headers", () => {
-  const executor = new QoderExecutor();
-  const credentials = { apiKey: "test-key-123" };
-
-  const headers = executor.buildHeaders(credentials, true);
-
-  // Must include required qoder headers
-  assert.ok(headers["session-id"], "Missing session-id header");
-  assert.ok(headers["x-qoder-timestamp"], "Missing x-qoder-timestamp header");
-  assert.ok(headers["x-qoder-signature"], "Missing x-qoder-signature header");
-
-  // session-id format
-  assert.ok(
-    headers["session-id"].startsWith("session-"),
-    "session-id should start with 'session-'"
+  assert.equal(
+    executor.buildUrl("qoder-rome-30ba3b", false),
+    "https://api.qoder.com/v1/chat/completions"
   );
-
-  // timestamp is a number string
-  assert.match(headers["x-qoder-timestamp"], /^\d+$/);
-
-  // signature is hex
-  assert.match(headers["x-qoder-signature"], /^[0-9a-f]{64}$/);
-
-  // Authorization
-  assert.equal(headers["Authorization"], "Bearer test-key-123");
-
-  // Content-Type
-  assert.equal(headers["Content-Type"], "application/json");
-
-  // Streaming Accept
-  assert.equal(headers["Accept"], "text/event-stream");
 });
 
-test("QoderExecutor: buildHeaders omits Accept header when stream is false", () => {
-  const executor = new QoderExecutor();
-  const credentials = { apiKey: "test-key" };
-
-  const headers = executor.buildHeaders(credentials, false);
-
-  assert.equal(headers["Accept"], undefined);
+test("normalizeQoderPatProviderData forces PAT + qodercli transport", () => {
+  assert.deepEqual(normalizeQoderPatProviderData({ region: "sa-east-1" }), {
+    region: "sa-east-1",
+    authMode: "pat",
+    transport: "qodercli",
+  });
 });
 
-test("QoderExecutor: buildHeaders uses accessToken when apiKey is missing", () => {
-  const executor = new QoderExecutor();
-  const credentials = { accessToken: "oauth-token-123" };
-
-  const headers = executor.buildHeaders(credentials);
-
-  assert.equal(headers["Authorization"], "Bearer oauth-token-123");
-  // Signature should still be generated using the accessToken
-  assert.ok(headers["x-qoder-signature"].length > 0);
+test("mapQoderModelToLevel maps static models to qodercli levels", () => {
+  assert.equal(mapQoderModelToLevel("qoder-rome-30ba3b"), "qmodel");
+  assert.equal(mapQoderModelToLevel("deepseek-r1"), "ultimate");
+  assert.equal(mapQoderModelToLevel("qwen3-max"), "performance");
+  assert.equal(mapQoderModelToLevel(""), null);
 });
 
-test("QoderExecutor: buildHeaders generates unique session IDs per call", () => {
-  const executor = new QoderExecutor();
-  const credentials = { apiKey: "key" };
-
-  const headers1 = executor.buildHeaders(credentials);
-  const headers2 = executor.buildHeaders(credentials);
-
-  assert.notEqual(headers1["session-id"], headers2["session-id"]);
+test("getStaticQoderModels exposes the static if/* catalog seed", () => {
+  const models = getStaticQoderModels();
+  assert.ok(models.some((model) => model.id === "qoder-rome-30ba3b"));
+  assert.ok(models.some((model) => model.id === "deepseek-r1"));
 });
 
-// ─── buildUrl ─────────────────────────────────────────────────
+test("buildQoderPrompt flattens transcript and warns against local tools", () => {
+  const prompt = buildQoderPrompt({
+    messages: [
+      { role: "system", content: "Follow the user request." },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Reply with OK." }],
+      },
+      {
+        role: "assistant",
+        tool_calls: [
+          {
+            type: "function",
+            function: { name: "pwd", arguments: "{}" },
+          },
+        ],
+        content: "",
+      },
+    ],
+    tools: [{ type: "function", function: { name: "pwd" } }],
+  });
 
-test("QoderExecutor: buildUrl returns config baseUrl", () => {
-  const executor = new QoderExecutor();
-  const url = executor.buildUrl("qwen3-coder-plus", true);
-
-  assert.equal(url, "https://apis.qoder.cn/v1/chat/completions");
+  assert.match(prompt, /Conversation transcript:/);
+  assert.match(prompt, /USER:\nReply with OK\./);
+  assert.match(prompt, /TOOL_CALL pwd: \{\}/);
+  assert.match(prompt, /Do not call those tools yourself\./);
 });
 
-// ─── transformRequest ─────────────────────────────────────────
+test("parseQoderCliFailure classifies auth, upstream and timeout failures", () => {
+  assert.deepEqual(parseQoderCliFailure("Invalid API key"), {
+    status: 401,
+    message: "Invalid API key",
+    code: "upstream_auth_error",
+  });
+  assert.deepEqual(parseQoderCliFailure("command not found: qodercli"), {
+    status: 502,
+    message: "command not found: qodercli",
+    code: "upstream_error",
+  });
+  assert.deepEqual(parseQoderCliFailure("request timed out"), {
+    status: 504,
+    message: "request timed out",
+    code: "timeout",
+  });
+});
 
-test("QoderExecutor: transformRequest passes body through unchanged", () => {
-  const executor = new QoderExecutor();
-  const body = {
-    model: "deepseek-r1",
-    messages: [{ role: "user", content: "Hello" }],
-    stream: true,
+test("validateQoderCliPat succeeds when the validation endpoint returns OK", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    assert.match(
+      String(url),
+      /api1\.qoder\.sh\/algo\/api\/v2\/service\/pro\/sse\/agent_chat_generation/
+    );
+    assert.equal(options.method, "POST");
+    assert.match(String(options.headers.Authorization), /^Bearer COSY\./);
+    return new Response("{}", { status: 200 });
   };
 
-  const result = executor.transformRequest("deepseek-r1", body, true, {});
-  assert.deepEqual(result, body);
+  try {
+    const result = await validateQoderCliPat({ apiKey: "pat_test" });
+    assert.deepEqual(result, { valid: true, error: null, unsupported: false });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
-// ─── Integration: executor registry ───────────────────────────
+test("validateQoderCliPat returns HTTP failures without touching the network", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("Invalid API key", { status: 401 });
 
-test("QoderExecutor: getExecutor('qoder') returns QoderExecutor instance", async () => {
-  const { getExecutor } = await import("../../open-sse/executors/index.ts");
-  const executor = getExecutor("qoder");
-  assert.ok(executor instanceof QoderExecutor, "Should return QoderExecutor instance");
+  try {
+    const result = await validateQoderCliPat({ apiKey: "pat_bad" });
+    assert.deepEqual(result, {
+      valid: false,
+      error: "HTTP 401: Invalid API key",
+      unsupported: false,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("QoderExecutor: missing tokens return an authentication error response", async () => {
+  const executor = new QoderExecutor();
+  const { response, url } = await executor.execute({
+    model: "qoder-rome-30ba3b",
+    body: { messages: [{ role: "user", content: "hi" }] },
+    stream: false,
+    credentials: {},
+  });
+
+  assert.equal(url, "https://dashscope.aliyuncs.com");
+  assert.equal(response.status, 401);
+  const payload = await response.json();
+  assert.equal(payload.error.code, "token_required");
+});
+
+test("QoderExecutor: non-stream calls target DashScope and map alias models", async () => {
+  const executor = new QoderExecutor();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    assert.equal(String(url), "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions");
+    assert.equal(options.method, "POST");
+    assert.equal(options.headers.Authorization, "Bearer pat_test");
+    assert.equal(options.headers["x-dashscope-authtype"], "qwen-oauth");
+    const parsedBody = JSON.parse(String(options.body));
+    assert.equal(parsedBody.model, "coder-model");
+    return new Response(
+      JSON.stringify({
+        id: "chatcmpl-qoder",
+        object: "chat.completion",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "OK" },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+
+  try {
+    const { response, url, transformedBody } = await executor.execute({
+      model: "qwen3.5-plus",
+      body: { messages: [{ role: "user", content: "Reply with OK only." }] },
+      stream: false,
+      credentials: { apiKey: "pat_test" },
+    });
+
+    assert.equal(url, "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions");
+    assert.equal(transformedBody.model, "coder-model");
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.object, "chat.completion");
+    assert.equal(payload.choices[0].message.role, "assistant");
+    assert.equal(payload.choices[0].message.content, "OK");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("QoderExecutor: stream calls pass through successful SSE responses", async () => {
+  const executor = new QoderExecutor();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response('data: {"choices":[{"delta":{"content":"O"}}]}\n\ndata: [DONE]\n\n', {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+
+  try {
+    const { response } = await executor.execute({
+      model: "qoder-rome-30ba3b",
+      body: { messages: [{ role: "user", content: "Reply with OK only." }] },
+      stream: true,
+      credentials: { apiKey: "pat_test" },
+    });
+
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.match(body, /"content":"O"/);
+    assert.match(body, /\[DONE\]/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -17,12 +17,18 @@ export const FREE_PROVIDERS = {
   kiro: { id: "kiro", alias: "kr", name: "Kiro AI", icon: "psychology_alt", color: "#FF6B35" },
 };
 
+export const FREE_APIKEY_PROVIDER_IDS = new Set(["qoder"]);
+
+export function supportsApiKeyOnFreeProvider(providerId) {
+  return FREE_APIKEY_PROVIDER_IDS.has(providerId);
+}
+
 // OAuth Providers
 export const OAUTH_PROVIDERS = {
   claude: { id: "claude", alias: "cc", name: "Claude Code", icon: "smart_toy", color: "#D97757" },
   antigravity: {
     id: "antigravity",
-    alias: "ag",
+    alias: undefined,
     name: "Antigravity",
     icon: "rocket_launch",
     color: "#F59E0B",
@@ -597,10 +603,51 @@ export const APIKEY_PROVIDERS = {
       "$0.025/day free credits — 200+ models (GPT-4o, Claude, Gemini, Llama) via single endpoint",
     passthroughModels: true,
   },
+  novita: {
+    id: "novita",
+    alias: "novita",
+    name: "Novita AI",
+    icon: "auto_awesome",
+    color: "#FF4081",
+    textIcon: "NV",
+    website: "https://novita.ai",
+    passthroughModels: true,
+  },
+  piapi: {
+    id: "piapi",
+    alias: "pi",
+    name: "PiAPI",
+    icon: "api",
+    color: "#7C4DFF",
+    textIcon: "PI",
+    website: "https://piapi.ai",
+    passthroughModels: true,
+  },
+  getgoapi: {
+    id: "getgoapi",
+    alias: "ggo",
+    name: "GoAPI",
+    icon: "rocket_launch",
+    color: "#FF6D00",
+    textIcon: "GO",
+    website: "https://api.getgoapi.com",
+    passthroughModels: true,
+  },
+  laozhang: {
+    id: "laozhang",
+    alias: "lz",
+    name: "LaoZhang AI",
+    icon: "hub",
+    color: "#FF1744",
+    textIcon: "LZ",
+    website: "https://api.laozhang.ai",
+    passthroughModels: true,
+  },
 };
 
 export const OPENAI_COMPATIBLE_PREFIX = "openai-compatible-";
 export const ANTHROPIC_COMPATIBLE_PREFIX = "anthropic-compatible-";
+export const CLAUDE_CODE_COMPATIBLE_PREFIX = "anthropic-compatible-cc-";
 
 export function isOpenAICompatibleProvider(providerId) {
   return typeof providerId === "string" && providerId.startsWith(OPENAI_COMPATIBLE_PREFIX);
@@ -610,8 +657,35 @@ export function isAnthropicCompatibleProvider(providerId) {
   return typeof providerId === "string" && providerId.startsWith(ANTHROPIC_COMPATIBLE_PREFIX);
 }
 
+export const UPSTREAM_PROXY_PROVIDERS = {
+  cliproxyapi: {
+    id: "cliproxyapi",
+    alias: "cpa",
+    name: "CLIProxyAPI",
+    icon: "proxy",
+    color: "#6366F1",
+    textIcon: "CPA",
+    website: "https://github.com/router-for-me/CLIProxyAPI",
+    defaultPort: 8317,
+    healthEndpoint: "/v1/models",
+    managementPrefix: "/v0/management",
+    configDir: "~/.cli-proxy-api",
+    binaryName: "cli-proxy-api",
+    githubRepo: "router-for-me/CLIProxyAPI",
+  },
+};
+
+export function isClaudeCodeCompatibleProvider(providerId) {
+  return typeof providerId === "string" && providerId.startsWith(CLAUDE_CODE_COMPATIBLE_PREFIX);
+}
+
 // All providers (combined)
-export const AI_PROVIDERS = { ...FREE_PROVIDERS, ...OAUTH_PROVIDERS, ...APIKEY_PROVIDERS };
+export const AI_PROVIDERS = {
+  ...FREE_PROVIDERS,
+  ...OAUTH_PROVIDERS,
+  ...APIKEY_PROVIDERS,
+  ...UPSTREAM_PROXY_PROVIDERS,
+};
 
 // Auth methods
 export const AUTH_METHODS = {
@@ -643,13 +717,13 @@ export function getProviderAlias(providerId) {
 
 // Alias to ID mapping (for quick lookup)
 export const ALIAS_TO_ID = Object.values(AI_PROVIDERS).reduce((acc, p) => {
-  acc[p.alias] = p.id;
+  if (p.alias) acc[p.alias] = p.id;
   return acc;
 }, {});
 
 // ID to Alias mapping
 export const ID_TO_ALIAS = Object.values(AI_PROVIDERS).reduce((acc, p) => {
-  acc[p.id] = p.alias;
+  acc[p.id] = p.alias || p.id;
   return acc;
 }, {});
 

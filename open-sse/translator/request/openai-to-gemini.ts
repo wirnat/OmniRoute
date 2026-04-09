@@ -2,12 +2,15 @@ import { register } from "../registry.ts";
 import { FORMATS } from "../formats.ts";
 import { DEFAULT_THINKING_GEMINI_SIGNATURE } from "../../config/defaultThinkingSignature.ts";
 import { ANTIGRAVITY_DEFAULT_SYSTEM } from "../../config/constants.ts";
+import { getGeminiThoughtSignature } from "../../services/geminiThoughtSignatureStore.ts";
 import { openaiToClaudeRequestForAntigravity } from "./openai-to-claude.ts";
 import {
   capMaxOutputTokens,
   capThinkingBudget,
   getDefaultThinkingBudget,
 } from "../../../src/shared/constants/modelSpecs.ts";
+
+import * as crypto from "crypto";
 
 function generateUUID() {
   return crypto.randomUUID();
@@ -33,7 +36,7 @@ type GeminiGenerationConfig = {
   maxOutputTokens?: unknown;
   thinkingConfig?: {
     thinkingBudget: number;
-    include_thoughts: boolean;
+    includeThoughts: boolean;
   };
   responseMimeType?: string;
   responseSchema?: unknown;
@@ -74,13 +77,22 @@ type CloudCodeEnvelope = {
   };
 };
 
+function normalizeAntigravityToolName(name: unknown) {
+  if (typeof name !== "string") return name;
+  const trimmed = name.trim();
+  if (!trimmed) return trimmed;
+
+  const namespaceIndex = trimmed.indexOf(":");
+  return namespaceIndex >= 0 ? trimmed.slice(namespaceIndex + 1) : trimmed;
+}
+
 // Core: Convert OpenAI request to Gemini format (base for all variants)
 function openaiToGeminiBase(model, body, stream) {
   const result: GeminiRequest = {
     model: model,
     contents: [],
     generationConfig: {},
-    safetySettings: DEFAULT_SAFETY_SETTINGS,
+    safetySettings: body.safetySettings || DEFAULT_SAFETY_SETTINGS,
   };
 
   // Preserve cachedContent if provided by client (for explicit Gemini caching)
@@ -98,8 +110,12 @@ function openaiToGeminiBase(model, body, stream) {
   if (body.top_k !== undefined) {
     result.generationConfig.topK = body.top_k;
   }
-  if (body.max_tokens !== undefined) {
-    result.generationConfig.maxOutputTokens = capMaxOutputTokens(model, body.max_tokens);
+  if (body.stop !== undefined) {
+    result.generationConfig.stopSequences = Array.isArray(body.stop) ? body.stop : [body.stop];
+  }
+  const requestedMaxOutputTokens = body.max_tokens ?? body.max_completion_tokens;
+  if (requestedMaxOutputTokens !== undefined) {
+    result.generationConfig.maxOutputTokens = capMaxOutputTokens(model, requestedMaxOutputTokens);
   } else {
     result.generationConfig.maxOutputTokens = capMaxOutputTokens(model);
   }
@@ -136,10 +152,17 @@ function openaiToGeminiBase(model, body, stream) {
       const content = msg.content;
 
       if (role === "system" && body.messages.length > 1) {
-        result.systemInstruction = {
-          role: "user",
-          parts: [{ text: typeof content === "string" ? content : extractTextContent(content) }],
-        };
+        const systemText = typeof content === "string" ? content : extractTextContent(content);
+        if (systemText) {
+          if (!result.systemInstruction) {
+            result.systemInstruction = {
+              role: "user",
+              parts: [{ text: systemText }],
+            };
+          } else {
+            result.systemInstruction.parts.push({ text: systemText });
+          }
+        }
       } else if (role === "user" || (role === "system" && body.messages.length === 1)) {
         const parts = convertOpenAIContentToParts(content);
         if (parts.length > 0) {
@@ -156,7 +179,6 @@ function openaiToGeminiBase(model, body, stream) {
           });
           parts.push({
             thoughtSignature: DEFAULT_THINKING_GEMINI_SIGNATURE,
-            text: "",
           });
         }
 
@@ -169,20 +191,39 @@ function openaiToGeminiBase(model, body, stream) {
 
         if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
           const toolCallIds = [];
+          const firstPersistedSignature = msg.tool_calls
+            .map((tc) => getGeminiThoughtSignature(tc.id))
+            .find((signature) => typeof signature === "string" && signature.length > 0);
+
+          const shouldUseEmbeddedSignature = !parts.some((p) => p.thoughtSignature);
+          let embeddedSignatureUsed = false;
+
           for (const tc of msg.tool_calls) {
             if (tc.type !== "function") continue;
 
             const args = tryParseJSON(tc.function?.arguments || "{}");
-            // Do NOT include thoughtSignature on functionCall parts — it is only valid
-            // on thinking/reasoning parts and causes HTTP 400 "invalid argument" from the
-            // Gemini API when present on a functionCall part (#725).
+            const signatureForToolCall = getGeminiThoughtSignature(tc.id);
+            const embeddedThoughtSignature =
+              shouldUseEmbeddedSignature && !embeddedSignatureUsed
+                ? firstPersistedSignature ||
+                  signatureForToolCall ||
+                  DEFAULT_THINKING_GEMINI_SIGNATURE
+                : undefined;
+
+            // Gemini expects the signature on the functionCall part itself. For
+            // parallel calls, only the first functionCall in the batch carries it.
             parts.push({
+              ...(embeddedThoughtSignature ? { thoughtSignature: embeddedThoughtSignature } : {}),
               functionCall: {
                 id: tc.id,
                 name: tc.function.name,
                 args: args,
               },
             });
+
+            if (embeddedThoughtSignature) {
+              embeddedSignatureUsed = true;
+            }
             toolCallIds.push(tc.id);
           }
 
@@ -306,7 +347,7 @@ export function openaiToGeminiCLIRequest(model, body, stream) {
     const budget = budgetMap[body.reasoning_effort] || getDefaultThinkingBudget(model) || 8192;
     gemini.generationConfig.thinkingConfig = {
       thinkingBudget: budget,
-      include_thoughts: true,
+      includeThoughts: true,
     };
   }
 
@@ -314,13 +355,14 @@ export function openaiToGeminiCLIRequest(model, body, stream) {
   if (body.thinking?.type === "enabled" && body.thinking.budget_tokens) {
     gemini.generationConfig.thinkingConfig = {
       thinkingBudget: body.thinking.budget_tokens,
-      include_thoughts: true,
+      includeThoughts: true,
     };
   }
 
   // Clean schema for tools
   if (gemini.tools?.[0]?.functionDeclarations) {
     for (const fn of gemini.tools[0].functionDeclarations) {
+      fn.name = normalizeAntigravityToolName(fn.name);
       if (fn.parameters) {
         const cleanedSchema = cleanJSONSchemaForAntigravity(fn.parameters);
         fn.parameters = cleanedSchema;
@@ -334,17 +376,31 @@ export function openaiToGeminiCLIRequest(model, body, stream) {
     }
   }
 
+  if (Array.isArray(gemini.contents)) {
+    for (const content of gemini.contents) {
+      if (!Array.isArray(content.parts)) continue;
+      for (const part of content.parts) {
+        if (part.functionCall?.name) {
+          part.functionCall.name = normalizeAntigravityToolName(part.functionCall.name);
+        }
+        if (part.functionResponse?.name) {
+          part.functionResponse.name = normalizeAntigravityToolName(part.functionResponse.name);
+        }
+      }
+    }
+  }
+
   return gemini;
 }
 
 // Wrap Gemini CLI format in Cloud Code wrapper
 function wrapInCloudCodeEnvelope(model, geminiCLI, credentials = null, isAntigravity = false) {
+  // Both Antigravity and Gemini CLI need the project field for the Cloud Code API.
+  // For Gemini CLI, the stored projectId may be stale; the executor's transformRequest
+  // refreshes it via loadCodeAssist before the request is sent to the API.
   let projectId = credentials?.projectId;
 
   if (!projectId) {
-    // Graceful fallback: warn instead of hard-throw so the request reaches
-    // the provider and fails with a meaningful provider-side error (#338).
-    // Users who reconnect OAuth will get their real projectId loaded.
     console.warn(
       `[OmniRoute] ${isAntigravity ? "Antigravity" : "GeminiCLI"} account is missing projectId. ` +
         `Attempting request with empty project — reconnect OAuth to resolve.`
@@ -432,6 +488,13 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
         for (const block of msg.content) {
           if (block.type === "text") {
             parts.push({ text: block.text });
+          } else if (block.type === "image" && block.source) {
+            parts.push({
+              inlineData: {
+                mimeType: block.source.media_type,
+                data: block.source.data,
+              },
+            });
           } else if (block.type === "tool_use") {
             parts.push({
               functionCall: {

@@ -138,4 +138,19 @@ describe("Cache Control Policy - Claude Protocol Providers", () => {
       false
     );
   });
+
+  test("shouldPreserveCacheControl treats CC-compatible providers like other Claude providers in auto mode", () => {
+    const claudeCodeUA = "Claude-Code/1.0.0";
+
+    assert.equal(
+      shouldPreserveCacheControl({
+        userAgent: claudeCodeUA,
+        isCombo: false,
+        targetProvider: "anthropic-compatible-cc-cm",
+        targetFormat: "claude",
+        settings: { alwaysPreserveClientCache: "auto" },
+      }),
+      true
+    );
+  });
 });

@@ -1,12 +1,15 @@
 /**
  * Shared combo (model combo) handling with fallback support
- * Supports: priority, weighted, round-robin, random, least-used, and cost-optimized strategies
+ * Supports: priority, weighted, round-robin, random, least-used, cost-optimized,
+ * strict-random, auto, fill-first, p2c, lkgp, context-optimized, and context-relay strategies
  */
 
 import { checkFallbackError, formatRetryAfter, getProviderProfile } from "./accountFallback.ts";
 import { unavailableResponse } from "../utils/error.ts";
 import { recordComboIntent, recordComboRequest, getComboMetrics } from "./comboMetrics.ts";
 import { resolveComboConfig, getDefaultComboConfig } from "./comboConfig.ts";
+import { maybeGenerateHandoff, resolveContextRelayConfig } from "./contextHandoff.ts";
+import { fetchCodexQuota } from "./codexQuotaFetcher.ts";
 import * as semaphore from "./rateLimitSemaphore.ts";
 import { getCircuitBreaker } from "../../src/shared/utils/circuitBreaker";
 import { fisherYatesShuffle, getNextFromDeck } from "../../src/shared/utils/shuffleDeck";
@@ -17,6 +20,8 @@ import { selectProvider as selectAutoProvider } from "./autoCombo/engine.ts";
 import { selectWithStrategy } from "./autoCombo/routerStrategy.ts";
 import { DEFAULT_WEIGHTS, scorePool } from "./autoCombo/scoring.ts";
 import { supportsToolCalling } from "./modelCapabilities.ts";
+import { getSessionConnection } from "./sessionManager.ts";
+import { getModelContextLimit } from "../../src/lib/modelsDevSync";
 
 // Status codes that should mark semaphore + record circuit breaker failures
 const TRANSIENT_FOR_BREAKER = [429, 502, 503, 504];
@@ -28,6 +33,7 @@ const COMBO_BAD_REQUEST_FALLBACK_PATTERNS = [
   /no such tool available/i,
   /unsupported content part type/i,
   /tool(?:_call|_use)? .* not (?:available|found)/i,
+  /third-party apps/i,
 ];
 
 const MAX_COMBO_DEPTH = 3;
@@ -99,7 +105,10 @@ async function validateResponseQuality(
     if (json?.output || json?.result || json?.data || json?.response) return { valid: true };
     if (json?.error) {
       const err = json.error as Record<string, unknown>;
-      return { valid: false, reason: `upstream error in 200 body: ${err?.message || JSON.stringify(json.error).substring(0, 200)}` };
+      return {
+        valid: false,
+        reason: `upstream error in 200 body: ${err?.message || JSON.stringify(json.error).substring(0, 200)}`,
+      };
     }
     return { valid: true };
   }
@@ -306,6 +315,24 @@ function sortModelsByUsage(models, comboName) {
   return withUsage.map((e) => e.modelStr);
 }
 
+/**
+ * Sort models by context window size (largest first) for context-optimized strategy.
+ * Uses models.dev synced capabilities to get context limits.
+ * @param {Array<string>} models - Model strings in "provider/model" format
+ * @returns {Array<string>} Sorted model strings (largest context first)
+ */
+function sortModelsByContextSize(models) {
+  const withContext = models.map((modelStr) => {
+    const parsed = parseModel(modelStr);
+    const provider = parsed.provider || parsed.providerAlias || "unknown";
+    const model = parsed.model || modelStr;
+    const limit = getModelContextLimit(provider, model);
+    return { modelStr, context: limit ?? 0 };
+  });
+  withContext.sort((a, b) => b.context - a.context);
+  return withContext.map((e) => e.modelStr);
+}
+
 function toTextContent(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -500,8 +527,7 @@ async function buildAutoCandidates(modelStrings, comboName) {
 }
 
 /**
- * Handle combo chat with fallback
- * Supports all 6 strategies: priority, weighted, round-robin, random, least-used, cost-optimized
+ * Handle combo chat with fallback.
  * @param {Object} options
  * @param {Object} options.body - Request body
  * @param {Object} options.combo - Full combo object { name, models, strategy, config }
@@ -519,9 +545,12 @@ export async function handleComboChat({
   log,
   settings,
   allCombos,
+  relayOptions,
 }) {
   const strategy = combo.strategy || "priority";
   const models = combo.models || [];
+  const relayConfig =
+    strategy === "context-relay" ? resolveContextRelayConfig(relayOptions?.config || null) : null;
 
   // ── Combo Agent Middleware (#399 + #401) ────────────────────────────────
   // Apply system_message override, tool_filter_regex, and extract pinned model
@@ -596,7 +625,7 @@ export async function handleComboChat({
               // Inject tag at the beginning of the first content value
               const injected = text.replace(
                 /"content":"([^"]+)/,
-                `"content":"${tagContent.replace(/"/g, '\\"')}$1`
+                `"content":"${tagContent.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}$1`
               );
               tagInjected = true;
               controller.enqueue(encoder.encode(injected));
@@ -809,6 +838,16 @@ export async function handleComboChat({
     const modePack =
       typeof autoConfigSource.modePack === "string" ? autoConfigSource.modePack : undefined;
 
+    // Retrieve last known good provider (LKGP) for this combo/model (#919)
+    let lastKnownGoodProvider: string | undefined;
+    try {
+      const { getLKGP } = await import("../../src/lib/localDb");
+      const lkgp = await getLKGP(combo.name, combo.id || combo.name);
+      if (lkgp) lastKnownGoodProvider = lkgp;
+    } catch (err) {
+      log.warn("COMBO", "Failed to retrieve Last Known Good Provider. This is non-fatal.", { err });
+    }
+
     const candidates = await buildAutoCandidates(eligibleModels, combo.name);
     if (candidates.length > 0) {
       let selectedProvider = null;
@@ -819,7 +858,7 @@ export async function handleComboChat({
         try {
           const decision = selectWithStrategy(
             candidates,
-            { taskType, requestHasTools },
+            { taskType, requestHasTools, lastKnownGoodProvider },
             routingStrategy
           );
           selectedProvider = decision.provider;
@@ -895,13 +934,15 @@ export async function handleComboChat({
   } else if (strategy === "cost-optimized") {
     orderedModels = await sortModelsByCost(orderedModels);
     log.info("COMBO", `Cost-optimized ordering: cheapest first (${orderedModels[0]})`);
+  } else if (strategy === "context-optimized") {
+    orderedModels = sortModelsByContextSize(orderedModels);
+    log.info("COMBO", `Context-optimized ordering: largest first (${orderedModels[0]})`);
   }
 
   let lastError = null;
   let earliestRetryAfter = null;
   let lastStatus = null;
   const startTime = Date.now();
-  let resolvedByModel = null;
   let fallbackCount = 0;
 
   for (let i = 0; i < orderedModels.length; i++) {
@@ -967,7 +1008,6 @@ export async function handleComboChat({
           if (i > 0) fallbackCount++;
           break; // move to next model
         }
-        resolvedByModel = modelStr;
         const latencyMs = Date.now() - startTime;
         log.info(
           "COMBO",
@@ -980,6 +1020,57 @@ export async function handleComboChat({
           fallbackCount,
           strategy,
         });
+
+        // Context-relay intentionally splits responsibilities:
+        // combo.ts decides whether a successful turn should generate a handoff,
+        // while chat.ts injects the handoff after the real connectionId is resolved.
+        if (
+          strategy === "context-relay" &&
+          relayOptions?.sessionId &&
+          relayConfig &&
+          relayConfig.handoffProviders.includes(provider) &&
+          provider === "codex"
+        ) {
+          const connectionId = getSessionConnection(relayOptions.sessionId);
+          if (connectionId) {
+            const quotaInfo = await fetchCodexQuota(connectionId).catch(() => null);
+            if (quotaInfo) {
+              const resetCandidates = [quotaInfo.window5h?.resetAt, quotaInfo.window7d?.resetAt]
+                .filter((value): value is string => typeof value === "string" && value.length > 0)
+                .sort();
+              const handoffSourceMessages =
+                Array.isArray(body?.messages) && body.messages.length > 0
+                  ? body.messages
+                  : Array.isArray(body?.input)
+                    ? body.input
+                    : [];
+
+              maybeGenerateHandoff({
+                sessionId: relayOptions.sessionId,
+                comboName: combo.name,
+                connectionId,
+                percentUsed: quotaInfo.percentUsed,
+                messages: handoffSourceMessages,
+                model: modelStr,
+                expiresAt: resetCandidates[0] || null,
+                config: relayConfig,
+                handleSingleModel: handleSingleModelWrapped,
+              });
+            }
+          }
+        }
+
+        // Record last known good provider (LKGP) for this combo/model (#919)
+        if (provider) {
+          import("../../src/lib/localDb")
+            .then(({ setLKGP }) => setLKGP(combo.name, combo.id || combo.name, provider))
+            .catch((err) =>
+              log.warn("COMBO", "Failed to record Last Known Good Provider. This is non-fatal.", {
+                err,
+              })
+            );
+        }
+
         return result;
       }
 
@@ -989,17 +1080,16 @@ export async function handleComboChat({
       try {
         const cloned = result.clone();
         try {
-          const errorBody = await cloned.json();
-          errorText =
-            errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
-          retryAfter = errorBody?.retryAfter || null;
-        } catch {
-          try {
-            const text = await result.text();
-            if (text) errorText = text.substring(0, 500);
-          } catch {
-            /* Body consumed */
+          const text = await cloned.text();
+          if (text) {
+            errorText = text.substring(0, 500);
+            const errorBody = JSON.parse(text);
+            errorText =
+              errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
+            retryAfter = errorBody?.retryAfter || null;
           }
+        } catch {
+          /* Clone parse failed */
         }
       } catch {
         /* Clone failed */
@@ -1272,17 +1362,16 @@ async function handleRoundRobinCombo({
         try {
           const cloned = result.clone();
           try {
-            const errorBody = await cloned.json();
-            errorText =
-              errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
-            retryAfter = errorBody?.retryAfter || null;
-          } catch {
-            try {
-              const text = await result.text();
-              if (text) errorText = text.substring(0, 500);
-            } catch {
-              /* Body consumed */
+            const text = await cloned.text();
+            if (text) {
+              errorText = text.substring(0, 500);
+              const errorBody = JSON.parse(text);
+              errorText =
+                errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
+              retryAfter = errorBody?.retryAfter || null;
             }
+          } catch {
+            /* Clone parse failed */
           }
         } catch {
           /* Clone failed */

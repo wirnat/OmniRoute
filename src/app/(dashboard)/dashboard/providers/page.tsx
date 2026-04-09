@@ -17,14 +17,25 @@ import {
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS } from "@/shared/constants/config";
 import {
   FREE_PROVIDERS,
-  OPENAI_COMPATIBLE_PREFIX,
-  ANTHROPIC_COMPATIBLE_PREFIX,
+  isAnthropicCompatibleProvider,
+  isClaudeCodeCompatibleProvider,
+  isOpenAICompatibleProvider,
 } from "@/shared/constants/providers";
 import Link from "next/link";
 import { getErrorCode, getRelativeTime } from "@/shared/utils";
 import { useNotificationStore } from "@/store/notificationStore";
 import ModelAvailabilityBadge from "./components/ModelAvailabilityBadge";
 import { useTranslations } from "next-intl";
+import {
+  buildMergedOAuthProviderEntries,
+  buildProviderEntries,
+  filterConfiguredProviderEntries,
+} from "./providerPageUtils";
+import { readConfiguredOnlyPreference, writeConfiguredOnlyPreference } from "./providerPageStorage";
+
+const CC_COMPATIBLE_LABEL = "CC Compatible";
+const ADD_CC_COMPATIBLE_LABEL = "Add CC Compatible";
+const CC_COMPATIBLE_DEFAULT_CHAT_PATH = "/v1/messages?beta=true";
 
 // Shared helper function to avoid code duplication between ProviderCard and ApiKeyProviderCard
 function getStatusDisplay(connected, error, errorCode, t) {
@@ -95,16 +106,25 @@ function getConnectionErrorTag(connection) {
 export default function ProvidersPage() {
   const [connections, setConnections] = useState<any[]>([]);
   const [providerNodes, setProviderNodes] = useState<any[]>([]);
+  const [ccCompatibleProviderEnabled, setCcCompatibleProviderEnabled] = useState(false);
   const [expirations, setExpirations] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [showAddCompatibleModal, setShowAddCompatibleModal] = useState(false);
   const [showAddAnthropicCompatibleModal, setShowAddAnthropicCompatibleModal] = useState(false);
+  const [showAddCcCompatibleModal, setShowAddCcCompatibleModal] = useState(false);
   const [testingMode, setTestingMode] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<any>(null);
   const [importingZed, setImportingZed] = useState(false);
+  const [showConfiguredOnly, setShowConfiguredOnly] = useState(false);
+  const [configuredOnlyPreferenceReady, setConfiguredOnlyPreferenceReady] = useState(false);
   const notify = useNotificationStore();
   const t = useTranslations("providers");
   const tc = useTranslations("common");
+
+  useEffect(() => {
+    setShowConfiguredOnly(readConfiguredOnlyPreference());
+    setConfiguredOnlyPreferenceReady(true);
+  }, []);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -118,7 +138,10 @@ export default function ProvidersPage() {
         const nodesData = await nodesRes.json();
         const expirationsData = await expirationsRes.json();
         if (connectionsRes.ok) setConnections(connectionsData.connections || []);
-        if (nodesRes.ok) setProviderNodes(nodesData.nodes || []);
+        if (nodesRes.ok) {
+          setProviderNodes(nodesData.nodes || []);
+          setCcCompatibleProviderEnabled(nodesData.ccCompatibleProviderEnabled === true);
+        }
         if (expirationsRes.ok && expirationsData) setExpirations(expirationsData);
       } catch (error) {
         console.log("Error fetching data:", error);
@@ -128,6 +151,12 @@ export default function ProvidersPage() {
     };
     fetchData();
   }, []);
+
+  useEffect(() => {
+    if (!configuredOnlyPreferenceReady) return;
+
+    writeConfiguredOnlyPreference(showConfiguredOnly);
+  }, [configuredOnlyPreferenceReady, showConfiguredOnly]);
 
   const handleZedImport = async () => {
     setImportingZed(true);
@@ -157,9 +186,11 @@ export default function ProvidersPage() {
   };
 
   const getProviderStats = (providerId, authType) => {
-    const providerConnections = connections.filter(
-      (c) => c.provider === providerId && c.authType === authType
-    );
+    const providerConnections = connections.filter((c) => {
+      if (c.provider !== providerId) return false;
+      if (authType === "free") return true;
+      return c.authType === authType;
+    });
 
     // Helper: check if connection is effectively active (cooldown expired)
     const getEffectiveStatus = (conn) => {
@@ -206,13 +237,17 @@ export default function ProvidersPage() {
 
   // Toggle all connections for a provider on/off
   const handleToggleProvider = async (providerId: string, authType: string, newActive: boolean) => {
-    const providerConns = connections.filter(
-      (c) => c.provider === providerId && c.authType === authType
-    );
+    const providerConns = connections.filter((c) => {
+      if (c.provider !== providerId) return false;
+      if (authType === "free") return true;
+      return c.authType === authType;
+    });
     // Optimistically update UI
     setConnections((prev) =>
       prev.map((c) =>
-        c.provider === providerId && c.authType === authType ? { ...c, isActive: newActive } : c
+        c.provider === providerId && (authType === "free" || c.authType === authType)
+          ? { ...c, isActive: newActive }
+          : c
       )
     );
     // Fire API calls in parallel
@@ -283,13 +318,63 @@ export default function ProvidersPage() {
     }));
 
   const anthropicCompatibleProviders = providerNodes
-    .filter((node) => node.type === "anthropic-compatible")
+    .filter(
+      (node) => node.type === "anthropic-compatible" && !isClaudeCodeCompatibleProvider(node.id)
+    )
     .map((node) => ({
       id: node.id,
       name: node.name || t("anthropicCompatibleName"),
       color: "#D97757",
       textIcon: "AC",
     }));
+
+  const ccCompatibleProviders = providerNodes
+    .filter(
+      (node) => node.type === "anthropic-compatible" && isClaudeCodeCompatibleProvider(node.id)
+    )
+    .map((node) => ({
+      id: node.id,
+      name: node.name || CC_COMPATIBLE_LABEL,
+      color: "#B45309",
+      textIcon: "CC",
+    }));
+
+  const oauthProviderEntries = filterConfiguredProviderEntries(
+    buildMergedOAuthProviderEntries(OAUTH_PROVIDERS, FREE_PROVIDERS, getProviderStats),
+    showConfiguredOnly
+  );
+
+  const apiKeyProviderEntries = filterConfiguredProviderEntries(
+    buildProviderEntries(APIKEY_PROVIDERS, "apikey", "apikey", getProviderStats),
+    showConfiguredOnly
+  );
+
+  const compatibleProviderEntries = filterConfiguredProviderEntries(
+    [
+      ...compatibleProviders.map((provider) => ({
+        providerId: provider.id,
+        provider,
+        stats: getProviderStats(provider.id, "apikey"),
+        displayAuthType: "compatible" as const,
+        toggleAuthType: "apikey" as const,
+      })),
+      ...anthropicCompatibleProviders.map((provider) => ({
+        providerId: provider.id,
+        provider,
+        stats: getProviderStats(provider.id, "apikey"),
+        displayAuthType: "compatible" as const,
+        toggleAuthType: "apikey" as const,
+      })),
+      ...ccCompatibleProviders.map((provider) => ({
+        providerId: provider.id,
+        provider,
+        stats: getProviderStats(provider.id, "apikey"),
+        displayAuthType: "compatible" as const,
+        toggleAuthType: "apikey" as const,
+      })),
+    ],
+    showConfiguredOnly
+  );
 
   if (loading) {
     return (
@@ -336,7 +421,7 @@ export default function ProvidersPage() {
           </div>
         )}
 
-      {/* OAuth Providers */}
+      {/* OAuth Providers (including providers that expose free tiers via OAuth) */}
       <div className="flex flex-col gap-4">
         <div className="flex flex-wrap items-center gap-2">
           <h2 className="text-xl font-semibold flex items-center gap-2 flex-1 min-w-0">
@@ -345,6 +430,13 @@ export default function ProvidersPage() {
           </h2>
           <div className="flex items-center gap-2">
             <ModelAvailabilityBadge />
+            <Toggle
+              size="sm"
+              checked={showConfiguredOnly}
+              onChange={setShowConfiguredOnly}
+              label={t("showConfiguredOnly")}
+              className="rounded-lg border border-border bg-bg-subtle px-3 py-1.5"
+            />
             <button
               onClick={handleZedImport}
               disabled={importingZed}
@@ -377,54 +469,18 @@ export default function ProvidersPage() {
           </div>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {Object.entries(OAUTH_PROVIDERS).map(([key, info]) => (
-            <ProviderCard
-              key={key}
-              providerId={key}
-              provider={info}
-              stats={getProviderStats(key, "oauth")}
-              authType="oauth"
-              onToggle={(active) => handleToggleProvider(key, "oauth", active)}
-            />
-          ))}
-        </div>
-      </div>
-
-      {/* Free Providers */}
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-xl font-semibold flex items-center gap-2 flex-1 min-w-0">
-            {t("freeProviders")}{" "}
-            <span className="size-2.5 rounded-full bg-green-500" title={tc("free")} />
-          </h2>
-          <button
-            onClick={() => handleBatchTest("free")}
-            disabled={!!testingMode}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
-              testingMode === "free"
-                ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
-                : "bg-bg-subtle border-border text-text-muted hover:text-text-primary hover:border-primary/40"
-            }`}
-            title={t("testAllFree")}
-            aria-label={t("testAllFree")}
-          >
-            <span className="material-symbols-outlined text-[14px]">
-              {testingMode === "free" ? "sync" : "play_arrow"}
-            </span>
-            {testingMode === "free" ? t("testing") : t("testAll")}
-          </button>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {Object.entries(FREE_PROVIDERS).map(([key, info]) => (
-            <ProviderCard
-              key={key}
-              providerId={key}
-              provider={info}
-              stats={getProviderStats(key, "oauth")}
-              authType="free"
-              onToggle={(active) => handleToggleProvider(key, "oauth", active)}
-            />
-          ))}
+          {oauthProviderEntries.map(
+            ({ providerId, provider, stats, displayAuthType, toggleAuthType }) => (
+              <ProviderCard
+                key={providerId}
+                providerId={providerId}
+                provider={provider}
+                stats={stats}
+                authType={displayAuthType}
+                onToggle={(active) => handleToggleProvider(providerId, toggleAuthType, active)}
+              />
+            )
+          )}
         </div>
       </div>
 
@@ -453,16 +509,18 @@ export default function ProvidersPage() {
           </button>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {Object.entries(APIKEY_PROVIDERS).map(([key, info]) => (
-            <ApiKeyProviderCard
-              key={key}
-              providerId={key}
-              provider={info}
-              stats={getProviderStats(key, "apikey")}
-              authType="apikey"
-              onToggle={(active) => handleToggleProvider(key, "apikey", active)}
-            />
-          ))}
+          {apiKeyProviderEntries.map(
+            ({ providerId, provider, stats, displayAuthType, toggleAuthType }) => (
+              <ApiKeyProviderCard
+                key={providerId}
+                providerId={providerId}
+                provider={provider}
+                stats={stats}
+                authType={displayAuthType}
+                onToggle={(active) => handleToggleProvider(providerId, toggleAuthType, active)}
+              />
+            )
+          )}
         </div>
       </div>
 
@@ -474,7 +532,9 @@ export default function ProvidersPage() {
             <span className="size-2.5 rounded-full bg-orange-500" title={t("compatibleLabel")} />
           </h2>
           <div className="flex flex-wrap gap-2">
-            {(compatibleProviders.length > 0 || anthropicCompatibleProviders.length > 0) && (
+            {(compatibleProviders.length > 0 ||
+              anthropicCompatibleProviders.length > 0 ||
+              ccCompatibleProviders.length > 0) && (
               <button
                 onClick={() => handleBatchTest("compatible")}
                 disabled={!!testingMode}
@@ -491,21 +551,22 @@ export default function ProvidersPage() {
                 {testingMode === "compatible" ? t("testing") : t("testAll")}
               </button>
             )}
+            {ccCompatibleProviderEnabled && (
+              <Button size="sm" icon="add" onClick={() => setShowAddCcCompatibleModal(true)}>
+                {ADD_CC_COMPATIBLE_LABEL}
+              </Button>
+            )}
             <Button size="sm" icon="add" onClick={() => setShowAddAnthropicCompatibleModal(true)}>
               {t("addAnthropicCompatible")}
             </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              icon="add"
-              onClick={() => setShowAddCompatibleModal(true)}
-              className="!bg-white !text-black hover:!bg-gray-100"
-            >
+            <Button size="sm" icon="add" onClick={() => setShowAddCompatibleModal(true)}>
               {t("addOpenAICompatible")}
             </Button>
           </div>
         </div>
-        {compatibleProviders.length === 0 && anthropicCompatibleProviders.length === 0 ? (
+        {compatibleProviders.length === 0 &&
+        anthropicCompatibleProviders.length === 0 &&
+        ccCompatibleProviders.length === 0 ? (
           <div className="text-center py-8 border border-dashed border-border rounded-xl">
             <span className="material-symbols-outlined text-[32px] text-text-muted mb-2">
               extension
@@ -515,16 +576,18 @@ export default function ProvidersPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {[...compatibleProviders, ...anthropicCompatibleProviders].map((info) => (
-              <ApiKeyProviderCard
-                key={info.id}
-                providerId={info.id}
-                provider={info}
-                stats={getProviderStats(info.id, "apikey")}
-                authType="compatible"
-                onToggle={(active) => handleToggleProvider(info.id, "apikey", active)}
-              />
-            ))}
+            {compatibleProviderEntries.map(
+              ({ providerId, provider, stats, displayAuthType, toggleAuthType }) => (
+                <ApiKeyProviderCard
+                  key={providerId}
+                  providerId={providerId}
+                  provider={provider}
+                  stats={stats}
+                  authType={displayAuthType}
+                  onToggle={(active) => handleToggleProvider(providerId, toggleAuthType, active)}
+                />
+              )
+            )}
           </div>
         )}
       </div>
@@ -544,6 +607,16 @@ export default function ProvidersPage() {
           setShowAddAnthropicCompatibleModal(false);
         }}
       />
+      {ccCompatibleProviderEnabled && (
+        <AddCcCompatibleModal
+          isOpen={showAddCcCompatibleModal}
+          onClose={() => setShowAddCcCompatibleModal(false)}
+          onCreated={(node) => {
+            setProviderNodes((prev) => [...prev, node]);
+            setShowAddCcCompatibleModal(false);
+          }}
+        />
+      )}
       {/* Test Results Modal */}
       {testResults && (
         <div
@@ -695,8 +768,10 @@ function ApiKeyProviderCard({ providerId, provider, stats, authType, onToggle })
   const t = useTranslations("providers");
   const tc = useTranslations("common");
   const { connected, error, errorCode, errorTime, allDisabled } = stats;
-  const isCompatible = providerId.startsWith(OPENAI_COMPATIBLE_PREFIX);
-  const isAnthropicCompatible = providerId.startsWith(ANTHROPIC_COMPATIBLE_PREFIX);
+  const isCompatible = isOpenAICompatibleProvider(providerId);
+  const isCcCompatible = isClaudeCodeCompatibleProvider(providerId);
+  const isAnthropicCompatible =
+    isAnthropicCompatibleProvider(providerId) && !isClaudeCodeCompatibleProvider(providerId);
 
   const dotColors = {
     free: "bg-green-500",
@@ -717,7 +792,7 @@ function ApiKeyProviderCard({ providerId, provider, stats, authType, onToggle })
     if (isCompatible) {
       return provider.apiType === "responses" ? "/providers/oai-r.png" : "/providers/oai-cc.png";
     }
-    if (isAnthropicCompatible) return "/providers/anthropic-m.png";
+    if (isAnthropicCompatible || isCcCompatible) return "/providers/anthropic-m.png";
     return null; // ProviderIcon will handle it
   })();
 
@@ -779,6 +854,11 @@ function ApiKeyProviderCard({ providerId, provider, stats, authType, onToggle })
                     {isCompatible && (
                       <Badge variant="default" size="sm">
                         {provider.apiType === "responses" ? t("responses") : t("chat")}
+                      </Badge>
+                    )}
+                    {isCcCompatible && (
+                      <Badge variant="default" size="sm">
+                        CC
                       </Badge>
                     )}
                     {isAnthropicCompatible && (
@@ -1227,6 +1307,190 @@ function AddAnthropicCompatibleModal({ isOpen, onClose, onCreated }) {
 }
 
 AddAnthropicCompatibleModal.propTypes = {
+  isOpen: PropTypes.bool.isRequired,
+  onClose: PropTypes.func.isRequired,
+  onCreated: PropTypes.func.isRequired,
+};
+
+function AddCcCompatibleModal({ isOpen, onClose, onCreated }) {
+  const t = useTranslations("providers");
+  const [formData, setFormData] = useState({
+    name: "",
+    prefix: "",
+    baseUrl: "https://api.anthropic.com",
+    chatPath: CC_COMPATIBLE_DEFAULT_CHAT_PATH,
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const [checkKey, setCheckKey] = useState("");
+  const [validating, setValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState<"success" | "failed" | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      setValidationResult(null);
+      setCheckKey("");
+    }
+  }, [isOpen]);
+
+  const handleSubmit = async () => {
+    if (!formData.name.trim() || !formData.prefix.trim() || !formData.baseUrl.trim()) return;
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/provider-nodes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: formData.name,
+          prefix: formData.prefix,
+          baseUrl: formData.baseUrl,
+          type: "anthropic-compatible",
+          compatMode: "cc",
+          chatPath: formData.chatPath || CC_COMPATIBLE_DEFAULT_CHAT_PATH,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        onCreated(data.node);
+        setFormData({
+          name: "",
+          prefix: "",
+          baseUrl: "https://api.anthropic.com",
+          chatPath: CC_COMPATIBLE_DEFAULT_CHAT_PATH,
+        });
+        setCheckKey("");
+        setValidationResult(null);
+        setShowAdvanced(false);
+      }
+    } catch (error) {
+      console.log("Error creating CC Compatible node:", error);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleValidate = async () => {
+    setValidating(true);
+    try {
+      const res = await fetch("/api/provider-nodes/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          baseUrl: formData.baseUrl,
+          apiKey: checkKey,
+          type: "anthropic-compatible",
+          compatMode: "cc",
+          chatPath: formData.chatPath || CC_COMPATIBLE_DEFAULT_CHAT_PATH,
+        }),
+      });
+      const data = await res.json();
+      setValidationResult(data.valid ? "success" : "failed");
+    } catch {
+      setValidationResult("failed");
+    } finally {
+      setValidating(false);
+    }
+  };
+
+  return (
+    <Modal isOpen={isOpen} title={ADD_CC_COMPATIBLE_LABEL} onClose={onClose}>
+      <div className="flex flex-col gap-4">
+        <Input
+          label={t("nameLabel")}
+          value={formData.name}
+          onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+          placeholder={t("compatibleProdPlaceholder", { type: CC_COMPATIBLE_LABEL })}
+          hint={t("nameHint")}
+        />
+        <Input
+          label={t("prefixLabel")}
+          value={formData.prefix}
+          onChange={(e) => setFormData({ ...formData, prefix: e.target.value })}
+          placeholder="cc-prod"
+          hint={t("prefixHint")}
+        />
+        <Input
+          label={t("baseUrlLabel")}
+          value={formData.baseUrl}
+          onChange={(e) => setFormData({ ...formData, baseUrl: e.target.value })}
+          placeholder="https://api.anthropic.com"
+          hint={t("compatibleBaseUrlHint", { type: CC_COMPATIBLE_LABEL })}
+        />
+        <button
+          type="button"
+          className="text-sm text-text-muted hover:text-text-primary flex items-center gap-1"
+          onClick={() => setShowAdvanced(!showAdvanced)}
+          aria-expanded={showAdvanced}
+          aria-controls="advanced-settings-cc"
+        >
+          <span
+            className={`transition-transform ${showAdvanced ? "rotate-90" : ""}`}
+            aria-hidden="true"
+          >
+            ▶
+          </span>
+          {t("advancedSettings")}
+        </button>
+        {showAdvanced && (
+          <div
+            id="advanced-settings-cc"
+            className="flex flex-col gap-3 pl-2 border-l-2 border-border"
+          >
+            <Input
+              label={t("chatPathLabel")}
+              value={formData.chatPath}
+              onChange={(e) => setFormData({ ...formData, chatPath: e.target.value })}
+              placeholder={CC_COMPATIBLE_DEFAULT_CHAT_PATH}
+              hint={t("chatPathHint")}
+            />
+          </div>
+        )}
+        <div className="flex gap-2">
+          <Input
+            label={t("apiKeyForCheck")}
+            type="password"
+            value={checkKey}
+            onChange={(e) => setCheckKey(e.target.value)}
+            className="flex-1"
+          />
+          <div className="pt-6">
+            <Button
+              onClick={handleValidate}
+              disabled={!checkKey || validating || !formData.baseUrl.trim()}
+              variant="secondary"
+            >
+              {validating ? t("checking") : t("check")}
+            </Button>
+          </div>
+        </div>
+        {validationResult && (
+          <Badge variant={validationResult === "success" ? "success" : "error"}>
+            {validationResult === "success" ? t("valid") : t("invalid")}
+          </Badge>
+        )}
+        <div className="flex gap-2">
+          <Button
+            onClick={handleSubmit}
+            fullWidth
+            disabled={
+              !formData.name.trim() ||
+              !formData.prefix.trim() ||
+              !formData.baseUrl.trim() ||
+              submitting
+            }
+          >
+            {submitting ? t("creating") : t("add")}
+          </Button>
+          <Button onClick={onClose} variant="ghost" fullWidth>
+            {t("cancel")}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+AddCcCompatibleModal.propTypes = {
   isOpen: PropTypes.bool.isRequired,
   onClose: PropTypes.func.isRequired,
   onCreated: PropTypes.func.isRequired,

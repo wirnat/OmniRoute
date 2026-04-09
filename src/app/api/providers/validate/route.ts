@@ -1,12 +1,15 @@
 import { NextResponse } from "next/server";
 import { getProviderNodeById } from "@/models";
 import {
+  isClaudeCodeCompatibleProvider,
   isOpenAICompatibleProvider,
   isAnthropicCompatibleProvider,
 } from "@/shared/constants/providers";
 import { validateProviderApiKey } from "@/lib/providers/validation";
+import { getProxyForLevel } from "@/lib/localDb";
 import { validateProviderApiKeySchema } from "@/shared/validation/schemas";
 import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
+import { runWithProxyContext } from "@omniroute/open-sse/utils/proxyFetch.ts";
 
 // POST /api/providers/validate - Validate API key with provider
 export async function POST(request) {
@@ -30,14 +33,21 @@ export async function POST(request) {
     if (isValidationFailure(validation)) {
       return NextResponse.json({ error: validation.error }, { status: 400 });
     }
-    const { provider, apiKey, validationModelId } = validation.data;
+    const { provider, apiKey, validationModelId, customUserAgent } = validation.data;
 
     let providerSpecificData: any = { validationModelId };
+    if (customUserAgent) {
+      providerSpecificData.customUserAgent = customUserAgent;
+    }
 
     if (isOpenAICompatibleProvider(provider) || isAnthropicCompatibleProvider(provider)) {
       const node: any = await getProviderNodeById(provider);
       if (!node) {
-        const typeName = isOpenAICompatibleProvider(provider) ? "OpenAI" : "Anthropic";
+        const typeName = isOpenAICompatibleProvider(provider)
+          ? "OpenAI"
+          : isClaudeCodeCompatibleProvider(provider)
+            ? "CC"
+            : "Anthropic";
         return NextResponse.json(
           { error: `${typeName} Compatible node not found` },
           { status: 404 }
@@ -47,14 +57,21 @@ export async function POST(request) {
         ...providerSpecificData,
         baseUrl: node.baseUrl,
         apiType: node.apiType,
+        chatPath: node.chatPath,
+        modelsPath: node.modelsPath,
       };
     }
 
-    const result = await validateProviderApiKey({
-      provider,
-      apiKey,
-      providerSpecificData,
-    });
+    const providerProxy = await getProxyForLevel("provider", provider);
+    const globalProxy = providerProxy ? null : await getProxyForLevel("global");
+
+    const result = await runWithProxyContext(providerProxy || globalProxy || null, () =>
+      validateProviderApiKey({
+        provider,
+        apiKey,
+        providerSpecificData,
+      })
+    );
 
     if (result.unsupported) {
       return NextResponse.json({ error: "Provider validation not supported" }, { status: 400 });

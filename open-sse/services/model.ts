@@ -19,7 +19,8 @@ const PROVIDER_MODEL_ALIASES = {
   github: {
     "claude-4.5-opus": "claude-opus-4-5-20251101",
     "claude-opus-4.5": "claude-opus-4-5-20251101",
-    "gemini-3-pro": "gemini-3-pro-preview",
+    "gemini-3-pro": "gemini-3.1-pro-preview",
+    "gemini-3-pro-preview": "gemini-3.1-pro-preview",
     "gemini-3-flash": "gemini-3-flash-preview",
     "raptor-mini": "oswe-vscode-prime",
   },
@@ -104,12 +105,13 @@ export function parseModel(modelStr) {
     extendedContext = true;
     cleanStr = cleanStr.slice(0, -4);
   }
+  cleanStr = cleanStr.trim();
 
   // Check if standard format: provider/model or alias/model
   if (cleanStr.includes("/")) {
     const firstSlash = cleanStr.indexOf("/");
-    const providerOrAlias = cleanStr.slice(0, firstSlash);
-    const model = cleanStr.slice(firstSlash + 1);
+    const providerOrAlias = cleanStr.slice(0, firstSlash).trim();
+    const model = cleanStr.slice(firstSlash + 1).trim();
     const provider = resolveProviderAlias(providerOrAlias);
     return { provider, model, isAlias: false, providerAlias: providerOrAlias, extendedContext };
   }
