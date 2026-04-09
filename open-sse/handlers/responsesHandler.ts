@@ -46,7 +46,11 @@ export async function handleResponsesCore({
     onCredentialsRefreshed,
     onRequestSuccess,
     onDisconnect,
-    clientRawRequest: null,
+    clientRawRequest: {
+      endpoint: "/v1/responses",
+      headers: {},
+      body,
+    },
     connectionId,
     userAgent: null,
     comboName: null,

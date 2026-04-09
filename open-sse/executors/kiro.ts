@@ -68,8 +68,7 @@ export class KiroExecutor extends BaseExecutor {
       ...this.config.headers,
       "Amz-Sdk-Request": "attempt=1; max=3",
       "Amz-Sdk-Invocation-Id": uuidv4(),
-      "x-amzn-bedrock-cache-control": "enable",
-      "anthropic-beta": "prompt-caching-2024-07-31",
+      "x-amzn-bedrock-cache-control": "disable",
     };
 
     if (credentials.accessToken) {

@@ -208,15 +208,23 @@ function convertMessages(messages, tools, model) {
     flushPending();
   }
 
-  // If last message in history is userInputMessage, use it as currentMessage
-  if (history.length > 0 && history[history.length - 1].userInputMessage) {
-    currentMessage = history.pop();
+  // Always detach the latest userInputMessage from history and use it as currentMessage.
+  // Kiro expects currentMessage as the active user turn, while history should contain prior context.
+  // If userInputMessage is left in history (e.g. when the last item is assistant), upstream may reject
+  // the payload as improperly formed.
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i]?.userInputMessage) {
+      currentMessage = history[i];
+      history.splice(i, 1);
+      break;
+    }
   }
 
   const firstHistoryItem = history[0];
   if (
     firstHistoryItem?.userInputMessage?.userInputMessageContext?.tools &&
-    !currentMessage?.userInputMessage?.userInputMessageContext?.tools
+    currentMessage?.userInputMessage &&
+    !currentMessage.userInputMessage.userInputMessageContext?.tools
   ) {
     if (!currentMessage.userInputMessage.userInputMessageContext) {
       currentMessage.userInputMessage.userInputMessageContext = {};
@@ -260,9 +268,7 @@ export function buildKiroPayload(model, body, stream, credentials) {
 
   const profileArn = credentials?.providerSpecificData?.profileArn || "";
 
-  let finalContent = currentMessage?.userInputMessage?.content || "";
-  const timestamp = new Date().toISOString();
-  finalContent = `[Context: Current time is ${timestamp}]\n\n${finalContent}`;
+  const finalContent = currentMessage?.userInputMessage?.content || "";
 
   const payload: {
     conversationState: {
@@ -287,7 +293,7 @@ export function buildKiroPayload(model, body, stream, credentials) {
   } = {
     conversationState: {
       chatTriggerType: "MANUAL",
-      conversationId: uuidv4(), // We must override this with deterministic ID
+      conversationId: uuidv4(),
       currentMessage: {
         userInputMessage: {
           content: finalContent,
@@ -301,20 +307,6 @@ export function buildKiroPayload(model, body, stream, credentials) {
       history: history,
     },
   };
-
-  // Determistic session caching for Kiro
-  const NAMESPACE_KIRO = "34f7193f-561d-4050-bc84-9547d953d6bf";
-  const firstContent =
-    history.length > 0 && history[0].userInputMessage?.content
-      ? history[0].userInputMessage.content
-      : finalContent;
-
-  // Use uuidv5 with the hash of the system prompt / first message to maintain AWS Builder ID context cache
-  const { v5: uuidv5 } = require("uuid");
-  payload.conversationState.conversationId = uuidv5(
-    (firstContent || "").substring(0, 4000),
-    NAMESPACE_KIRO
-  );
 
   if (profileArn) {
     payload.profileArn = profileArn;
