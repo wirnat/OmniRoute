@@ -17,12 +17,16 @@ export function isEmptyContentResponse(responseBody: unknown): boolean {
     const delta = firstChoice.delta as Record<string, unknown> | undefined;
 
     const content = message?.content ?? delta?.content;
+    const reasoningContent = message?.reasoning_content ?? delta?.reasoning_content;
     const hasToolCalls =
       (Array.isArray(message?.tool_calls) && (message.tool_calls as unknown[]).length > 0) ||
       (Array.isArray(delta?.tool_calls) && (delta.tool_calls as unknown[]).length > 0);
 
     const hasContent = content !== null && content !== undefined && content !== "";
-    return !hasContent && !hasToolCalls;
+    const hasReasoning =
+      reasoningContent !== null && reasoningContent !== undefined && reasoningContent !== "";
+
+    return !hasContent && !hasReasoning && !hasToolCalls;
   }
 
   if (Array.isArray(body.content)) {
@@ -92,10 +96,7 @@ export function classifyProviderError(statusCode: number, responseBody: unknown)
   const accountDeactivated = isAccountDeactivated(bodyStr);
   const oauthInvalid = isOAuthInvalidToken(bodyStr);
 
-  if (
-    creditsExhausted &&
-    (statusCode === 400 || statusCode === 402 || statusCode === 429 || statusCode === 403)
-  ) {
+  if (creditsExhausted && [400, 402, 403, 429].includes(statusCode)) {
     return PROVIDER_ERROR_TYPES.QUOTA_EXHAUSTED;
   }
 

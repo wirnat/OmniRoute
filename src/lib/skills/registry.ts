@@ -2,11 +2,17 @@ import { Skill, SkillSchema } from "./types";
 import { SkillCreateInputSchema } from "./schemas";
 import { getDbInstance } from "../db/core";
 import { randomUUID } from "crypto";
+import { logger } from "../../../open-sse/utils/logger.ts";
+
+const log = logger("SKILLS");
 
 class SkillRegistry {
   private static instance: SkillRegistry;
   private registeredSkills: Map<string, Skill> = new Map();
   private versionCache: Map<string, Map<string, Skill>> = new Map();
+  private lastLoaded: number = 0;
+  private readonly cacheTTL: number = 60_000; // 60 seconds
+  private pendingLoad: Promise<void> | null = null; // dedupes concurrent cache fills
 
   private constructor() {}
 
@@ -17,6 +23,14 @@ class SkillRegistry {
     return SkillRegistry.instance;
   }
 
+  private isCacheStale(): boolean {
+    return Date.now() - this.lastLoaded > this.cacheTTL;
+  }
+
+  invalidateCache(): void {
+    this.lastLoaded = 0;
+  }
+
   async register(skillData: {
     name: string;
     version?: string;
@@ -25,16 +39,27 @@ class SkillRegistry {
     handler: string;
     enabled?: boolean;
     apiKeyId: string;
+    mode?: "on" | "off" | "auto";
+    sourceProvider?: "skillsmp" | "skillssh" | "local";
+    tags?: string[];
+    installCount?: number;
   }): Promise<Skill> {
-    const { apiKeyId: _apiKeyId, ...parseableData } = skillData;
+    const {
+      apiKeyId: _apiKeyId,
+      mode: _mode,
+      sourceProvider: _sourceProvider,
+      tags: _tags,
+      installCount: _installCount,
+      ...parseableData
+    } = skillData;
     const parsed = SkillCreateInputSchema.parse(parseableData);
     const db = getDbInstance();
     const id = randomUUID();
     const now = new Date();
 
     db.prepare(
-      `INSERT INTO skills (id, api_key_id, name, version, description, schema, handler, enabled, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO skills (id, api_key_id, name, version, description, schema, handler, enabled, mode, source_provider, tags, install_count, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       id,
       skillData.apiKeyId,
@@ -44,6 +69,10 @@ class SkillRegistry {
       JSON.stringify(parsed.schema),
       parsed.handler,
       parsed.enabled ? 1 : 0,
+      skillData.mode || (parsed.enabled ? "on" : "off"),
+      skillData.sourceProvider || null,
+      JSON.stringify(skillData.tags || []),
+      typeof skillData.installCount === "number" ? Math.max(0, skillData.installCount) : 0,
       now.toISOString(),
       now.toISOString()
     );
@@ -57,12 +86,18 @@ class SkillRegistry {
       schema: parsed.schema,
       handler: parsed.handler,
       enabled: parsed.enabled,
+      mode: skillData.mode || (parsed.enabled ? "on" : "off"),
+      sourceProvider: skillData.sourceProvider,
+      tags: skillData.tags || [],
+      installCount:
+        typeof skillData.installCount === "number" ? Math.max(0, skillData.installCount) : 0,
       createdAt: now,
       updatedAt: now,
     };
 
     this.registeredSkills.set(`${parsed.name}@${parsed.version}`, skill);
     this.updateVersionCache(skill);
+    this.invalidateCache();
 
     return skill;
   }
@@ -77,6 +112,7 @@ class SkillRegistry {
         db.prepare("DELETE FROM skills WHERE id = ?").run(skill.id);
         this.registeredSkills.delete(key);
         this.rebuildVersionCache(name);
+        this.invalidateCache();
         return true;
       }
     } else {
@@ -90,6 +126,7 @@ class SkillRegistry {
           .map(([key]) => key);
         keysToDelete.forEach((k) => this.registeredSkills.delete(k));
         this.rebuildVersionCache(name);
+        this.invalidateCache();
         return true;
       }
     }
@@ -110,12 +147,14 @@ class SkillRegistry {
         });
       keysToDelete.forEach((k) => this.registeredSkills.delete(k));
       affectedNames.forEach((name) => this.rebuildVersionCache(name));
+      this.invalidateCache();
       return true;
     }
     return false;
   }
 
   list(apiKeyId?: string): Skill[] {
+    log.debug("skills.registry.list", { apiKeyId, cached: !this.isCacheStale() });
     if (apiKeyId) {
       return Array.from(this.registeredSkills.values()).filter((s) => s.apiKeyId === apiKeyId);
     }
@@ -212,26 +251,67 @@ class SkillRegistry {
   }
 
   async loadFromDatabase(apiKeyId?: string): Promise<void> {
-    const db = getDbInstance();
-    const rows = apiKeyId
-      ? db.prepare("SELECT * FROM skills WHERE api_key_id = ?").all(apiKeyId)
-      : db.prepare("SELECT * FROM skills").all();
+    if (this.pendingLoad) {
+      await this.pendingLoad;
+      return;
+    }
+    if (!this.isCacheStale()) return;
 
-    for (const row of rows as any[]) {
-      const skill: Skill = {
-        id: row.id,
-        apiKeyId: row.api_key_id,
-        name: row.name,
-        version: row.version,
-        description: row.description || "",
-        schema: JSON.parse(row.schema),
-        handler: row.handler,
-        enabled: row.enabled === 1,
-        createdAt: new Date(row.created_at),
-        updatedAt: new Date(row.updated_at),
-      };
-      this.registeredSkills.set(`${skill.name}@${skill.version}`, skill);
-      this.updateVersionCache(skill);
+    this.pendingLoad = (async () => {
+      try {
+        log.debug("skills.registry.loadFromDatabase", { cached: false });
+        const db = getDbInstance();
+        const rows = apiKeyId
+          ? db.prepare("SELECT * FROM skills WHERE api_key_id = ?").all(apiKeyId)
+          : db.prepare("SELECT * FROM skills").all();
+
+        for (const row of rows as any[]) {
+          const tags = (() => {
+            try {
+              if (typeof row.tags !== "string") return [];
+              const parsed = JSON.parse(row.tags);
+              return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+            } catch {
+              return [];
+            }
+          })();
+
+          const skill: Skill = {
+            id: row.id,
+            apiKeyId: row.api_key_id,
+            name: row.name,
+            version: row.version,
+            description: row.description || "",
+            schema: JSON.parse(row.schema),
+            handler: row.handler,
+            enabled: row.enabled === 1,
+            mode: row.mode === "off" || row.mode === "auto" ? row.mode : "on",
+            sourceProvider:
+              row.source_provider === "skillsmp" || row.source_provider === "skillssh"
+                ? row.source_provider
+                : row.source_provider
+                  ? "local"
+                  : undefined,
+            tags,
+            installCount: typeof row.install_count === "number" ? row.install_count : 0,
+            createdAt: new Date(row.created_at),
+            updatedAt: new Date(row.updated_at),
+          };
+          this.registeredSkills.set(`${skill.name}@${skill.version}`, skill);
+          this.updateVersionCache(skill);
+        }
+        this.lastLoaded = Date.now();
+      } catch (err: any) {
+        log.error("loadFromDatabase error:", err);
+        throw err;
+      } finally {
+        this.pendingLoad = null;
+      }
+    })();
+    try {
+      await this.pendingLoad;
+    } finally {
+      this.pendingLoad = null;
     }
   }
 }

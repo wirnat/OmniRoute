@@ -5,7 +5,8 @@ import PropTypes from "prop-types";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/shared/utils/cn";
-import { APP_CONFIG } from "@/shared/constants/config";
+import { getActiveSidebarHref } from "@/shared/utils/sidebarRouteMatch";
+import { APP_CONFIG } from "@/shared/constants/appConfig";
 import OmniRouteLogo from "./OmniRouteLogo";
 import Button from "./Button";
 import { ConfirmModal } from "./Modal";
@@ -91,13 +92,6 @@ export default function Sidebar({
     };
   }, []);
 
-  const isActive = (href, exact) => {
-    if (exact) {
-      return pathname === href;
-    }
-    return pathname.startsWith(href);
-  };
-
   const handleShutdown = async () => {
     setIsShuttingDown(true);
     try {
@@ -140,9 +134,13 @@ export default function Sidebar({
         .filter((item) => !hiddenSidebarSet.has(item.id)),
     }))
     .filter((section) => section.items.length > 0);
+  const activeHref = getActiveSidebarHref(
+    pathname,
+    visibleSections.flatMap((section) => section.items)
+  );
 
   const renderNavLink = (item) => {
-    const active = !item.external && isActive(item.href, item.exact);
+    const active = !item.external && activeHref === item.href;
     const className = cn(
       "flex items-center gap-3 rounded-lg transition-all group",
       collapsed ? "justify-center px-2 py-2.5" : "px-4 py-2",
@@ -194,7 +192,7 @@ export default function Sidebar({
     <>
       <aside
         className={cn(
-          "flex h-full min-h-0 flex-col border-r border-black/5 bg-vibrancy backdrop-blur-xl transition-all duration-300 ease-in-out dark:border-white/5",
+          "flex h-full min-h-0 flex-col border-r border-black/5 bg-sidebar transition-all duration-300 ease-in-out dark:border-white/5",
           collapsed ? "w-16" : "w-80"
         )}
         style={{

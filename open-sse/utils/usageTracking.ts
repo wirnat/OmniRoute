@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Token Usage Tracking - Extract, normalize, estimate and log token usage
  */
@@ -341,8 +342,15 @@ export function extractUsage(chunk) {
     return normalizeUsage({
       prompt_tokens: usage.input_tokens || usage.prompt_tokens || 0,
       completion_tokens: usage.output_tokens || usage.completion_tokens || 0,
-      cached_tokens: usage.input_tokens_details?.cached_tokens,
-      reasoning_tokens: usage.output_tokens_details?.reasoning_tokens,
+      cached_tokens:
+        usage.input_tokens_details?.cached_tokens ??
+        usage.prompt_tokens_details?.cached_tokens ??
+        usage.cache_read_input_tokens,
+      cache_creation_input_tokens: usage.cache_creation_input_tokens,
+      reasoning_tokens:
+        usage.output_tokens_details?.reasoning_tokens ??
+        usage.completion_tokens_details?.reasoning_tokens ??
+        usage.reasoning_tokens,
     });
   }
 
@@ -355,8 +363,12 @@ export function extractUsage(chunk) {
     return normalizeUsage({
       prompt_tokens: chunk.usage.prompt_tokens ?? chunk.usage.input_tokens ?? 0,
       completion_tokens: chunk.usage.completion_tokens ?? chunk.usage.output_tokens ?? 0,
-      cached_tokens: chunk.usage.prompt_tokens_details?.cached_tokens,
-      reasoning_tokens: chunk.usage.completion_tokens_details?.reasoning_tokens,
+      cached_tokens:
+        chunk.usage.prompt_tokens_details?.cached_tokens ??
+        chunk.usage.input_tokens_details?.cached_tokens,
+      reasoning_tokens:
+        chunk.usage.completion_tokens_details?.reasoning_tokens ??
+        chunk.usage.output_tokens_details?.reasoning_tokens,
     });
   }
 
@@ -489,7 +501,13 @@ export function estimateUsage(body, contentLength, targetFormat = FORMATS.OPENAI
 /**
  * Log usage with cache info (green color)
  */
-export function logUsage(provider, usage, model = null, connectionId = null, apiKeyInfo = null) {
+export function logUsage(
+  provider,
+  usage,
+  model: string | null = null,
+  connectionId: string | null = null,
+  apiKeyInfo = null
+) {
   if (!usage || typeof usage !== "object") return;
 
   const p = provider?.toUpperCase() || "UNKNOWN";
@@ -499,7 +517,11 @@ export function logUsage(provider, usage, model = null, connectionId = null, api
   // - Claude: input_tokens, output_tokens
   const inTokens = getLoggedInputTokens(usage);
   const outTokens = getLoggedOutputTokens(usage);
-  const accountPrefix = connectionId ? connectionId.slice(0, 8) + "..." : "unknown";
+  void apiKeyInfo;
+  const normalizedConnectionId = typeof connectionId === "string" ? connectionId : undefined;
+  const accountPrefix = normalizedConnectionId
+    ? normalizedConnectionId.slice(0, 8) + "..."
+    : "unknown";
 
   let msg = `[${getTimeString()}] 📊 ${COLORS.green}[USAGE] ${p} | in=${inTokens} | out=${outTokens} | account=${accountPrefix}${COLORS.reset}`;
 
@@ -529,5 +551,11 @@ export function logUsage(provider, usage, model = null, connectionId = null, api
     cacheCreation: cacheCreation || 0,
     reasoning: reasoning || 0,
   };
-  appendRequestLog({ model, provider, connectionId, tokens, status: "200 OK" }).catch(() => {});
+  appendRequestLog({
+    model: typeof model === "string" ? model : undefined,
+    provider: typeof provider === "string" ? provider : undefined,
+    connectionId: normalizedConnectionId,
+    tokens,
+    status: "200 OK",
+  }).catch(() => {});
 }

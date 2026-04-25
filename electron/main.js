@@ -61,26 +61,45 @@ let mainWindow = null;
 let tray = null;
 let nextServer = null;
 let serverPort = 20128;
+let isServerStopped = false;
 
 const getServerUrl = () => `http://localhost:${serverPort}`;
 
 function resolveNodeExecutable(env = process.env) {
-  const candidates = [
-    env.OMNIROUTE_NODE_PATH,
-    "/usr/local/bin/node",
-    "/opt/homebrew/bin/node",
-    "/opt/local/bin/node",
-  ].filter(Boolean);
+  // #1081: Ensure Next.js standalone runs using Electron's Node runtime
+  // instead of a randomly found system Node to prevent ABI architecture mismatches.
+  return process.execPath;
+}
 
-  for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) return candidate;
-    } catch {
-      /* continue */
+function resolveServerNodePath(env = process.env) {
+  const seen = new Set();
+  const entries = [];
+
+  const addEntry = (entry) => {
+    if (!entry || typeof entry !== "string") return;
+    const trimmed = entry.trim();
+    if (!trimmed) return;
+    const normalized = path.normalize(trimmed);
+    if (seen.has(normalized)) return; // already included
+    if (!fs.existsSync(normalized)) {
+      console.debug("[Electron] NODE_PATH candidate not found (skipped):", normalized);
+      return;
     }
+    seen.add(normalized);
+    entries.push(normalized);
+  };
+
+  for (const existing of (env.NODE_PATH || "").split(path.delimiter)) {
+    addEntry(existing);
   }
 
-  return "node";
+  // Electron-builder installs native modules like better-sqlite3 under
+  // app.asar.unpacked, while the standalone bundle still carries helper deps
+  // such as bindings/file-uri-to-path inside resources/app/node_modules.
+  addEntry(path.join(process.resourcesPath, "app.asar.unpacked", "node_modules"));
+  addEntry(path.join(NEXT_SERVER_PATH, "node_modules"));
+
+  return entries.join(path.delimiter);
 }
 
 function resolveDataDir(overridePath, env = process.env) {
@@ -549,6 +568,8 @@ function startNextServer() {
       DATA_DIR: dataDir,
       PORT: String(serverPort),
       NODE_ENV: "production",
+      ELECTRON_RUN_AS_NODE: "1",
+      NODE_PATH: resolveServerNodePath(serverEnv),
     },
     stdio: "pipe",
   });
@@ -703,9 +724,21 @@ app.on("window-all-closed", () => {
 });
 
 // Clean up before quit
-app.on("before-quit", () => {
-  app.isQuitting = true;
-  stopNextServer();
+app.on("before-quit", async (event) => {
+  if (nextServer && !isServerStopped) {
+    event.preventDefault(); // Stop immediate quit
+    app.isQuitting = true;
+
+    // Stop server and wait up to 5s for graceful WAL checkpoint
+    const serverToStop = nextServer;
+    stopNextServer();
+    await waitForServerExit(serverToStop, 5000);
+
+    isServerStopped = true;
+    app.quit(); // Resume quit safely
+  } else {
+    app.isQuitting = true;
+  }
 });
 
 // Global error handlers

@@ -1,14 +1,26 @@
 import { NextResponse } from "next/server";
 import { getSettings, updateSettings } from "@/lib/localDb";
-import bcrypt from "bcryptjs";
+import {
+  hasManagementPasswordConfigured,
+  hashManagementPassword,
+} from "@/lib/auth/managementPassword";
+import { isAuthenticated } from "@/shared/utils/apiAuth";
+import { getNodeRuntimeSupport } from "@/shared/utils/nodeRuntimeSupport.ts";
 import { updateRequireLoginSchema } from "@/shared/validation/schemas";
 import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
 
-// Node.js compatibility check — better-sqlite3 requires Node <24
+// Node.js compatibility check — reflect the supported secure runtime floors used by CLI/CI.
 function getNodeCompatibility() {
-  const nodeVersion = process.version;
-  const major = parseInt(nodeVersion.replace("v", "").split(".")[0], 10);
-  return { nodeVersion, nodeCompatible: major >= 18 && major < 24 };
+  const { nodeVersion, nodeCompatible } = getNodeRuntimeSupport();
+  return { nodeVersion, nodeCompatible };
+}
+
+function hasConfiguredPassword(settings: Record<string, unknown>) {
+  return hasManagementPasswordConfigured(settings);
+}
+
+function isBootstrapSecurityWindow(settings: Record<string, unknown>) {
+  return settings.setupComplete !== true && !hasConfiguredPassword(settings);
 }
 
 export async function GET() {
@@ -16,7 +28,7 @@ export async function GET() {
   try {
     const settings = await getSettings();
     const requireLogin = settings.requireLogin !== false;
-    const hasPassword = !!settings.password || !!process.env.INITIAL_PASSWORD;
+    const hasPassword = hasManagementPasswordConfigured(settings);
     const setupComplete = !!settings.setupComplete;
     return NextResponse.json({ requireLogin, hasPassword, setupComplete, ...nodeInfo });
   } catch (error) {
@@ -30,9 +42,14 @@ export async function GET() {
 
 /**
  * POST /api/settings/require-login — Set password and/or toggle requireLogin.
- * Used by the onboarding wizard security step.
+ * Unauthenticated writes are only allowed during the initial bootstrap window.
  */
 export async function POST(request: Request) {
+  const settings = await getSettings();
+  if (!isBootstrapSecurityWindow(settings) && !(await isAuthenticated(request))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   let rawBody;
   try {
     rawBody = await request.json();
@@ -63,7 +80,7 @@ export async function POST(request: Request) {
     }
 
     if (password) {
-      const hashedPassword = await bcrypt.hash(password, 12);
+      const hashedPassword = await hashManagementPassword(password);
       updates.password = hashedPassword;
     }
 

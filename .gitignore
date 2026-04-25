@@ -99,6 +99,10 @@ docs/*
 !docs/MCP-SERVER.md
 !docs/CLI-TOOLS.md
 !docs/COVERAGE_PLAN.md
+!docs/ENVIRONMENT.md
+!docs/UNINSTALL.md
+!docs/I18N.md
+!docs/FLY_IO_DEPLOYMENT_GUIDE.md
 
 
 # open-sse tests
@@ -165,3 +169,10 @@ docs/superpowers/
 
 # GitNexus local index
 .gitnexus
+.worktrees
+bin/omniroute.mjs
+
+# Consistent with .dockerignore / .npmignore
+.omc/
+audit-report.json
+bun.lock

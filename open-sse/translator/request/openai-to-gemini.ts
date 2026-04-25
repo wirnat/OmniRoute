@@ -2,13 +2,13 @@ import { register } from "../registry.ts";
 import { FORMATS } from "../formats.ts";
 import { DEFAULT_THINKING_GEMINI_SIGNATURE } from "../../config/defaultThinkingSignature.ts";
 import { ANTIGRAVITY_DEFAULT_SYSTEM } from "../../config/constants.ts";
-import { getGeminiThoughtSignature } from "../../services/geminiThoughtSignatureStore.ts";
+import { resolveGeminiThoughtSignature } from "../../services/geminiThoughtSignatureStore.ts";
 import { openaiToClaudeRequestForAntigravity } from "./openai-to-claude.ts";
 import {
   capMaxOutputTokens,
   capThinkingBudget,
   getDefaultThinkingBudget,
-} from "../../../src/shared/constants/modelSpecs.ts";
+} from "../../../src/lib/modelCapabilities.ts";
 
 import * as crypto from "crypto";
 
@@ -25,6 +25,7 @@ import {
   generateSessionId,
   cleanJSONSchemaForAntigravity,
 } from "../helpers/geminiHelper.ts";
+import { buildGeminiTools, sanitizeGeminiToolName } from "../helpers/geminiToolsSanitizer.ts";
 
 type GeminiPart = Record<string, unknown>;
 type GeminiContent = { role: string; parts: GeminiPart[] };
@@ -40,6 +41,7 @@ type GeminiGenerationConfig = {
   };
   responseMimeType?: string;
   responseSchema?: unknown;
+  stopSequences?: string[] | unknown[];
 };
 
 type GeminiFunctionDeclaration = {
@@ -54,8 +56,12 @@ type GeminiRequest = {
   generationConfig: GeminiGenerationConfig;
   safetySettings: unknown;
   systemInstruction?: GeminiContent;
-  tools?: Array<{ functionDeclarations: GeminiFunctionDeclaration[] }>;
+  tools?: Array<{
+    functionDeclarations?: GeminiFunctionDeclaration[];
+    googleSearch?: Record<string, unknown>;
+  }>;
   cachedContent?: string;
+  _toolNameMap?: Map<string, string>;
 };
 
 type CloudCodeEnvelope = {
@@ -69,31 +75,55 @@ type CloudCodeEnvelope = {
     contents: GeminiContent[];
     systemInstruction?: GeminiContent;
     generationConfig: GeminiGenerationConfig;
-    tools?: Array<{ functionDeclarations: GeminiFunctionDeclaration[] }>;
+    tools?: Array<{
+      functionDeclarations?: GeminiFunctionDeclaration[];
+      googleSearch?: Record<string, unknown>;
+    }>;
     safetySettings?: unknown;
     toolConfig?: {
       functionCallingConfig: { mode: string };
     };
   };
+  _toolNameMap?: Map<string, string>;
 };
 
-function normalizeAntigravityToolName(name: unknown) {
-  if (typeof name !== "string") return name;
-  const trimmed = name.trim();
-  if (!trimmed) return trimmed;
+type GeminiToolNameOptions = {
+  stripNamespace?: boolean;
+};
 
-  const namespaceIndex = trimmed.indexOf(":");
-  return namespaceIndex >= 0 ? trimmed.slice(namespaceIndex + 1) : trimmed;
+function buildChangedToolNameMap(toolNameMap: Map<string, string>): Map<string, string> | null {
+  const changedEntries = [...toolNameMap.entries()].filter(
+    ([sanitizedName, originalName]) => sanitizedName !== originalName
+  );
+  return changedEntries.length > 0 ? new Map(changedEntries) : null;
+}
+
+function extractClientThoughtSignature(toolCall) {
+  if (!toolCall || typeof toolCall !== "object") return null;
+
+  return (
+    toolCall.thoughtSignature ||
+    toolCall.thought_signature ||
+    toolCall.function?.thoughtSignature ||
+    toolCall.function?.thought_signature ||
+    null
+  );
 }
 
 // Core: Convert OpenAI request to Gemini format (base for all variants)
-function openaiToGeminiBase(model, body, stream) {
+function openaiToGeminiBase(model, body, stream, toolNameOptions: GeminiToolNameOptions = {}) {
   const result: GeminiRequest = {
     model: model,
     contents: [],
     generationConfig: {},
     safetySettings: body.safetySettings || DEFAULT_SAFETY_SETTINGS,
   };
+  const toolNameMap = new Map<string, string>();
+  const sanitizeToolName = (name: string) =>
+    sanitizeGeminiToolName(name, {
+      ...toolNameOptions,
+      toolNameMap,
+    });
 
   // Preserve cachedContent if provided by client (for explicit Gemini caching)
   if (body.cachedContent) {
@@ -177,9 +207,6 @@ function openaiToGeminiBase(model, body, stream) {
             thought: true,
             text: msg.reasoning_content,
           });
-          parts.push({
-            thoughtSignature: DEFAULT_THINKING_GEMINI_SIGNATURE,
-          });
         }
 
         if (content) {
@@ -192,38 +219,37 @@ function openaiToGeminiBase(model, body, stream) {
         if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
           const toolCallIds = [];
           const firstPersistedSignature = msg.tool_calls
-            .map((tc) => getGeminiThoughtSignature(tc.id))
+            .map((tc) => resolveGeminiThoughtSignature(tc.id, extractClientThoughtSignature(tc)))
             .find((signature) => typeof signature === "string" && signature.length > 0);
 
-          const shouldUseEmbeddedSignature = !parts.some((p) => p.thoughtSignature);
-          let embeddedSignatureUsed = false;
+          let shouldUseEmbeddedSignature = !parts.some((p) => p.thoughtSignature);
 
           for (const tc of msg.tool_calls) {
             if (tc.type !== "function") continue;
 
             const args = tryParseJSON(tc.function?.arguments || "{}");
-            const signatureForToolCall = getGeminiThoughtSignature(tc.id);
-            const embeddedThoughtSignature =
-              shouldUseEmbeddedSignature && !embeddedSignatureUsed
-                ? firstPersistedSignature ||
-                  signatureForToolCall ||
-                  DEFAULT_THINKING_GEMINI_SIGNATURE
-                : undefined;
+            const signatureForToolCall = resolveGeminiThoughtSignature(
+              tc.id,
+              extractClientThoughtSignature(tc)
+            );
+            const embeddedThoughtSignature = shouldUseEmbeddedSignature
+              ? firstPersistedSignature || signatureForToolCall
+              : undefined;
 
-            // Gemini expects the signature on the functionCall part itself. For
-            // parallel calls, only the first functionCall in the batch carries it.
+            if (embeddedThoughtSignature) {
+              shouldUseEmbeddedSignature = false;
+            }
+
+            // Gemini expects the signature on the functionCall part itself.
             parts.push({
               ...(embeddedThoughtSignature ? { thoughtSignature: embeddedThoughtSignature } : {}),
               functionCall: {
                 id: tc.id,
-                name: tc.function.name,
+                name: sanitizeToolName(tc.function.name),
                 args: args,
               },
             });
 
-            if (embeddedThoughtSignature) {
-              embeddedSignatureUsed = true;
-            }
             toolCallIds.push(tc.id);
           }
 
@@ -248,6 +274,7 @@ function openaiToGeminiBase(model, body, stream) {
                   name = fid;
                 }
               }
+              name = sanitizeToolName(name);
 
               let resp = toolResponses[fid];
               let parsedResp = tryParseJSON(resp);
@@ -277,35 +304,12 @@ function openaiToGeminiBase(model, body, stream) {
   }
 
   // Convert tools
-  if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
-    const functionDeclarations = [];
-    for (const t of body.tools) {
-      // Check if already in Anthropic/Claude format (no type field, direct name/description/input_schema)
-      if (t.name && t.input_schema) {
-        functionDeclarations.push({
-          name: t.name,
-          description: t.description || "",
-          parameters: cleanJSONSchemaForAntigravity(
-            t.input_schema || { type: "object", properties: {} }
-          ),
-        });
-      }
-      // OpenAI format
-      else if (t.type === "function" && t.function) {
-        const fn = t.function;
-        functionDeclarations.push({
-          name: fn.name,
-          description: fn.description || "",
-          parameters: cleanJSONSchemaForAntigravity(
-            fn.parameters || { type: "object", properties: {} }
-          ),
-        });
-      }
-    }
-
-    if (functionDeclarations.length > 0) {
-      result.tools = [{ functionDeclarations }];
-    }
+  const geminiTools = buildGeminiTools(body.tools, {
+    ...toolNameOptions,
+    toolNameMap,
+  });
+  if (geminiTools) {
+    result.tools = geminiTools;
   }
 
   // Convert response_format to Gemini's responseMimeType/responseSchema
@@ -324,6 +328,11 @@ function openaiToGeminiBase(model, body, stream) {
     }
   }
 
+  const changedToolNameMap = buildChangedToolNameMap(toolNameMap);
+  if (changedToolNameMap) {
+    result._toolNameMap = changedToolNameMap;
+  }
+
   return result;
 }
 
@@ -334,8 +343,7 @@ export function openaiToGeminiRequest(model, body, stream) {
 
 // OpenAI -> Gemini CLI (Cloud Code Assist)
 export function openaiToGeminiCLIRequest(model, body, stream) {
-  const gemini = openaiToGeminiBase(model, body, stream);
-  const isClaude = model.toLowerCase().includes("claude");
+  const gemini = openaiToGeminiBase(model, body, stream, { stripNamespace: true });
 
   // Add thinking config for CLI
   if (body.reasoning_effort) {
@@ -357,37 +365,6 @@ export function openaiToGeminiCLIRequest(model, body, stream) {
       thinkingBudget: body.thinking.budget_tokens,
       includeThoughts: true,
     };
-  }
-
-  // Clean schema for tools
-  if (gemini.tools?.[0]?.functionDeclarations) {
-    for (const fn of gemini.tools[0].functionDeclarations) {
-      fn.name = normalizeAntigravityToolName(fn.name);
-      if (fn.parameters) {
-        const cleanedSchema = cleanJSONSchemaForAntigravity(fn.parameters);
-        fn.parameters = cleanedSchema;
-        // if (isClaude) {
-        //   fn.parameters = cleanedSchema;
-        // } else {
-        //   fn.parametersJsonSchema = cleanedSchema;
-        //   delete fn.parameters;
-        // }
-      }
-    }
-  }
-
-  if (Array.isArray(gemini.contents)) {
-    for (const content of gemini.contents) {
-      if (!Array.isArray(content.parts)) continue;
-      for (const part of content.parts) {
-        if (part.functionCall?.name) {
-          part.functionCall.name = normalizeAntigravityToolName(part.functionCall.name);
-        }
-        if (part.functionResponse?.name) {
-          part.functionResponse.name = normalizeAntigravityToolName(part.functionResponse.name);
-        }
-      }
-    }
   }
 
   return gemini;
@@ -423,6 +400,9 @@ function wrapInCloudCodeEnvelope(model, geminiCLI, credentials = null, isAntigra
       tools: geminiCLI.tools,
     },
   };
+  if (geminiCLI._toolNameMap instanceof Map && geminiCLI._toolNameMap.size > 0) {
+    envelope._toolNameMap = geminiCLI._toolNameMap;
+  }
 
   // Antigravity specific fields
   if (isAntigravity) {
@@ -437,7 +417,7 @@ function wrapInCloudCodeEnvelope(model, geminiCLI, credentials = null, isAntigra
     }
 
     // Add toolConfig for Antigravity
-    if (geminiCLI.tools?.length > 0) {
+    if (geminiCLI.tools?.some((tool) => Array.isArray(tool.functionDeclarations))) {
       envelope.request.toolConfig = {
         functionCallingConfig: { mode: "VALIDATED" },
       };
@@ -451,6 +431,12 @@ function wrapInCloudCodeEnvelope(model, geminiCLI, credentials = null, isAntigra
 }
 
 function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = null) {
+  const toolNameMap = new Map<string, string>();
+  const sanitizeToolName = (name: string) =>
+    sanitizeGeminiToolName(name, {
+      stripNamespace: true,
+      toolNameMap,
+    });
   let projectId = credentials?.projectId;
 
   if (!projectId) {
@@ -479,6 +465,18 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
     },
   };
 
+  const toolUseNames: Record<string, string> = {};
+  if (claudeRequest.messages && Array.isArray(claudeRequest.messages)) {
+    for (const msg of claudeRequest.messages) {
+      if (!Array.isArray(msg.content)) continue;
+      for (const block of msg.content) {
+        if (block.type === "tool_use" && block.id && typeof block.name === "string") {
+          toolUseNames[block.id] = sanitizeToolName(block.name);
+        }
+      }
+    }
+  }
+
   // Convert Claude messages to Gemini contents
   if (claudeRequest.messages && Array.isArray(claudeRequest.messages)) {
     for (const msg of claudeRequest.messages) {
@@ -499,7 +497,7 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
             parts.push({
               functionCall: {
                 id: block.id,
-                name: block.name,
+                name: sanitizeToolName(block.name),
                 args: block.input || {},
               },
             });
@@ -513,7 +511,7 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
             parts.push({
               functionResponse: {
                 id: block.tool_use_id,
-                name: "unknown",
+                name: toolUseNames[block.tool_use_id] || "unknown",
                 response: { result: tryParseJSON(content) || content },
               },
             });
@@ -534,19 +532,12 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
 
   // Convert Claude tools to Gemini functionDeclarations
   if (claudeRequest.tools && Array.isArray(claudeRequest.tools)) {
-    const functionDeclarations = [];
-    for (const tool of claudeRequest.tools) {
-      if (tool.name && tool.input_schema) {
-        const cleanedSchema = cleanJSONSchemaForAntigravity(tool.input_schema);
-        functionDeclarations.push({
-          name: tool.name,
-          description: tool.description || "",
-          parameters: cleanedSchema,
-        });
-      }
-    }
-    if (functionDeclarations.length > 0) {
-      envelope.request.tools = [{ functionDeclarations }];
+    const geminiTools = buildGeminiTools(claudeRequest.tools, {
+      stripNamespace: true,
+      toolNameMap,
+    });
+    if (geminiTools) {
+      envelope.request.tools = geminiTools;
       envelope.request.toolConfig = {
         functionCallingConfig: { mode: "VALIDATED" },
       };
@@ -568,6 +559,11 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
   }
 
   envelope.request.systemInstruction = { role: "user", parts: systemParts };
+
+  const changedToolNameMap = buildChangedToolNameMap(toolNameMap);
+  if (changedToolNameMap) {
+    envelope._toolNameMap = changedToolNameMap;
+  }
 
   return envelope;
 }

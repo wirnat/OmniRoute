@@ -34,7 +34,7 @@ type PricingEntry = {
 type PricingModels = Record<string, PricingEntry>;
 type PricingByProvider = Record<string, PricingModels>;
 
-interface CapabilityEntry {
+export interface ModelCapabilityEntry {
   tool_call: boolean | null;
   reasoning: boolean | null;
   attachment: boolean | null;
@@ -54,7 +54,7 @@ interface CapabilityEntry {
   interleaved_field: string | null;
 }
 
-type CapabilitiesByProvider = Record<string, Record<string, CapabilityEntry>>;
+export type CapabilitiesByProvider = Record<string, Record<string, ModelCapabilityEntry>>;
 
 interface SyncStatus {
   enabled: boolean;
@@ -175,7 +175,7 @@ const MODELS_DEV_PROVIDER_MAP: Record<string, string[]> = {
   // Additional providers that may overlap with OmniRoute
   alibaba: ["ali", "alibaba", "bcp", "alicode", "alicode-intl"],
   zai: ["zai", "glm"], // GLM models via Z.AI
-  moonshot: ["kimi", "kimi-coding", "kmc", "kmca"],
+  moonshot: ["moonshot", "kimi", "kimi-coding", "kmc", "kmca"],
   minimax: ["minimax", "minimax-cn"],
   longcat: ["lc", "longcat"],
   pollinations: ["pol", "pollinations"],
@@ -202,6 +202,9 @@ export function mapProviderId(modelsDevProviderId: string): string[] {
 // ─── Periodic sync state ─────────────────────────────────
 
 let syncTimer: ReturnType<typeof setInterval> | null = null;
+let activeSyncAbortController: AbortController | null = null;
+let activeSyncPromise: Promise<SyncResult> | null = null;
+let activePeriodicSyncToken: { stopped: boolean } | null = null;
 let lastSyncTime: string | null = null;
 let lastSyncModelCount = 0;
 let lastSyncCapabilityCount = 0;
@@ -209,6 +212,50 @@ let activeSyncIntervalMs = SYNC_INTERVAL_MS;
 let cachedData: ModelsDevData | null = null;
 let cacheTime = 0;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+let cachedCapabilities: CapabilitiesByProvider | null = null;
+let cachedCapabilitiesLoadedAll = false;
+const MODELS_DEV_ABORT_ERROR = "AbortError";
+
+function createAbortError(): Error {
+  const error = new Error("models.dev sync aborted");
+  error.name = MODELS_DEV_ABORT_ERROR;
+  return error;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === MODELS_DEV_ABORT_ERROR;
+}
+
+function createAbortedSyncResult(dryRun: boolean): SyncResult {
+  return {
+    success: false,
+    modelCount: 0,
+    providerCount: 0,
+    capabilityCount: 0,
+    dryRun,
+    error: "aborted",
+  };
+}
+
+async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(createAbortError());
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 // ─── Core: Fetch ─────────────────────────────────────────
 
@@ -216,14 +263,14 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
  * Fetch raw data from models.dev API.
  * Uses in-memory cache with 24h TTL to avoid repeated fetches.
  */
-export async function fetchModelsDev(): Promise<ModelsDevData> {
+export async function fetchModelsDev(signal?: AbortSignal): Promise<ModelsDevData> {
   // Return cached data if still fresh
   if (cachedData && Date.now() - cacheTime < CACHE_TTL_MS) {
     return cachedData;
   }
 
   const response = await fetch(MODELS_DEV_API_URL, {
-    signal: AbortSignal.timeout(30000),
+    signal: signal ?? AbortSignal.timeout(30000),
   });
   if (!response.ok) {
     throw new Error(`models.dev fetch failed [${response.status}]: ${response.statusText}`);
@@ -297,7 +344,7 @@ export function transformModelsDevToCapabilities(raw: ModelsDevData): Capabiliti
     const omniRouteProviders = mapProviderId(providerId);
 
     for (const [modelId, model] of Object.entries(providerData.models || {})) {
-      const cap: CapabilityEntry = {
+      const cap: ModelCapabilityEntry = {
         tool_call: model.tool_call ?? null,
         reasoning: model.reasoning ?? null,
         attachment: model.attachment ?? null,
@@ -336,6 +383,31 @@ export function transformModelsDevToCapabilities(raw: ModelsDevData): Capabiliti
 
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function mapCapabilityRecord(record: Record<string, unknown>): ModelCapabilityEntry {
+  return {
+    tool_call: record.tool_call === 1 ? true : record.tool_call === 0 ? false : null,
+    reasoning: record.reasoning === 1 ? true : record.reasoning === 0 ? false : null,
+    attachment: record.attachment === 1 ? true : record.attachment === 0 ? false : null,
+    structured_output:
+      record.structured_output === 1 ? true : record.structured_output === 0 ? false : null,
+    temperature: record.temperature === 1 ? true : record.temperature === 0 ? false : null,
+    modalities_input: typeof record.modalities_input === "string" ? record.modalities_input : "[]",
+    modalities_output:
+      typeof record.modalities_output === "string" ? record.modalities_output : "[]",
+    knowledge_cutoff: typeof record.knowledge_cutoff === "string" ? record.knowledge_cutoff : null,
+    release_date: typeof record.release_date === "string" ? record.release_date : null,
+    last_updated: typeof record.last_updated === "string" ? record.last_updated : null,
+    status: typeof record.status === "string" ? record.status : null,
+    family: typeof record.family === "string" ? record.family : null,
+    open_weights: record.open_weights === 1 ? true : record.open_weights === 0 ? false : null,
+    limit_context: typeof record.limit_context === "number" ? record.limit_context : null,
+    limit_input: typeof record.limit_input === "number" ? record.limit_input : null,
+    limit_output: typeof record.limit_output === "number" ? record.limit_output : null,
+    interleaved_field:
+      typeof record.interleaved_field === "string" ? record.interleaved_field : null,
+  };
 }
 
 /**
@@ -429,10 +501,20 @@ export function ensureCapabilitiesTable(): void {
 /**
  * Read synced capabilities from `model_capabilities` table.
  */
-export function getSyncedCapabilities(
-  provider?: string,
-  modelId?: string
-): Record<string, Record<string, CapabilityEntry>> {
+export function getSyncedCapabilities(provider?: string, modelId?: string): CapabilitiesByProvider {
+  if (cachedCapabilitiesLoadedAll) {
+    if (!provider) {
+      return cachedCapabilities || {};
+    }
+
+    if (!modelId) {
+      return cachedCapabilities?.[provider] ? { [provider]: cachedCapabilities[provider] } : {};
+    }
+
+    const providerCaps = cachedCapabilities?.[provider];
+    return providerCaps?.[modelId] ? { [provider]: { [modelId]: providerCaps[modelId] } } : {};
+  }
+
   const db = getDbInstance();
   ensureCapabilitiesTable();
 
@@ -449,7 +531,7 @@ export function getSyncedCapabilities(
   }
 
   const rows = db.prepare(query).all(...params);
-  const result: Record<string, Record<string, CapabilityEntry>> = {};
+  const result: CapabilitiesByProvider = {};
 
   for (const row of rows) {
     const record = toRecord(row);
@@ -458,33 +540,34 @@ export function getSyncedCapabilities(
     if (!prov || !mid) continue;
 
     if (!result[prov]) result[prov] = {};
-    result[prov][mid] = {
-      tool_call: record.tool_call === 1 ? true : record.tool_call === 0 ? false : null,
-      reasoning: record.reasoning === 1 ? true : record.reasoning === 0 ? false : null,
-      attachment: record.attachment === 1 ? true : record.attachment === 0 ? false : null,
-      structured_output:
-        record.structured_output === 1 ? true : record.structured_output === 0 ? false : null,
-      temperature: record.temperature === 1 ? true : record.temperature === 0 ? false : null,
-      modalities_input:
-        typeof record.modalities_input === "string" ? record.modalities_input : "[]",
-      modalities_output:
-        typeof record.modalities_output === "string" ? record.modalities_output : "[]",
-      knowledge_cutoff:
-        typeof record.knowledge_cutoff === "string" ? record.knowledge_cutoff : null,
-      release_date: typeof record.release_date === "string" ? record.release_date : null,
-      last_updated: typeof record.last_updated === "string" ? record.last_updated : null,
-      status: typeof record.status === "string" ? record.status : null,
-      family: typeof record.family === "string" ? record.family : null,
-      open_weights: record.open_weights === 1 ? true : record.open_weights === 0 ? false : null,
-      limit_context: typeof record.limit_context === "number" ? record.limit_context : null,
-      limit_input: typeof record.limit_input === "number" ? record.limit_input : null,
-      limit_output: typeof record.limit_output === "number" ? record.limit_output : null,
-      interleaved_field:
-        typeof record.interleaved_field === "string" ? record.interleaved_field : null,
-    };
+    result[prov][mid] = mapCapabilityRecord(record);
+  }
+
+  if (!provider && !modelId) {
+    cachedCapabilities = result;
+    cachedCapabilitiesLoadedAll = true;
   }
 
   return result;
+}
+
+export function getSyncedCapability(
+  provider: string,
+  modelId: string
+): ModelCapabilityEntry | null {
+  if (!provider || !modelId) return null;
+
+  if (cachedCapabilitiesLoadedAll) {
+    return cachedCapabilities?.[provider]?.[modelId] ?? null;
+  }
+
+  const db = getDbInstance();
+  ensureCapabilitiesTable();
+  const row = db
+    .prepare("SELECT * FROM model_capabilities WHERE provider = ? AND model_id = ? LIMIT 1")
+    .get(provider, modelId);
+  if (!row) return null;
+  return mapCapabilityRecord(toRecord(row));
 }
 
 /**
@@ -536,6 +619,8 @@ export function saveModelsDevCapabilities(data: CapabilitiesByProvider): void {
   });
   tx();
   backupDbFile("pre-write");
+  cachedCapabilities = data;
+  cachedCapabilitiesLoadedAll = true;
 }
 
 /**
@@ -546,6 +631,8 @@ export function clearModelsDevCapabilities(): void {
   ensureCapabilitiesTable();
   db.prepare("DELETE FROM model_capabilities").run();
   backupDbFile("pre-write");
+  cachedCapabilities = {};
+  cachedCapabilitiesLoadedAll = true;
 }
 
 // ─── Main sync function ──────────────────────────────────
@@ -556,55 +643,93 @@ export function clearModelsDevCapabilities(): void {
 export async function syncModelsDev(opts?: {
   dryRun?: boolean;
   syncCapabilities?: boolean;
+  maxRetries?: number;
+  signal?: AbortSignal;
 }): Promise<SyncResult> {
   const dryRun = opts?.dryRun ?? false;
   const syncCapabilities = opts?.syncCapabilities ?? true;
+  const maxRetries = opts?.maxRetries ?? 3;
+  const signal = opts?.signal;
 
-  try {
-    const raw = await fetchModelsDev();
-    const pricing = transformModelsDevToPricing(raw);
-    const capabilities = syncCapabilities ? transformModelsDevToCapabilities(raw) : {};
+  let lastError: Error | null = null;
 
-    const modelCount = Object.values(pricing).reduce(
-      (sum, models) => sum + Object.keys(models).length,
-      0
-    );
-    const providerCount = Object.keys(pricing).length;
-    const capabilityCount = syncCapabilities
-      ? Object.values(capabilities).reduce((sum, models) => sum + Object.keys(models).length, 0)
-      : 0;
-
-    if (!dryRun) {
-      saveModelsDevPricing(pricing);
-      if (syncCapabilities) {
-        ensureCapabilitiesTable();
-        saveModelsDevCapabilities(capabilities);
-      }
-      lastSyncTime = new Date().toISOString();
-      lastSyncModelCount = modelCount;
-      lastSyncCapabilityCount = capabilityCount;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) {
+      return createAbortedSyncResult(dryRun);
     }
 
-    return {
-      success: true,
-      modelCount,
-      providerCount,
-      capabilityCount,
-      dryRun,
-      ...(dryRun ? { data: { pricing, capabilities } } : {}),
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn("[MODELS_DEV] Sync failed:", message);
-    return {
-      success: false,
-      modelCount: 0,
-      providerCount: 0,
-      capabilityCount: 0,
-      dryRun,
-      error: message,
-    };
+    try {
+      const raw = await fetchModelsDev(signal);
+      const pricing = transformModelsDevToPricing(raw);
+      const capabilities = syncCapabilities ? transformModelsDevToCapabilities(raw) : {};
+
+      const modelCount = Object.values(pricing).reduce(
+        (sum, models) => sum + Object.keys(models).length,
+        0
+      );
+      const providerCount = Object.keys(pricing).length;
+      const capabilityCount = syncCapabilities
+        ? Object.values(capabilities).reduce((sum, models) => sum + Object.keys(models).length, 0)
+        : 0;
+
+      if (signal?.aborted) {
+        return createAbortedSyncResult(dryRun);
+      }
+
+      if (!dryRun) {
+        saveModelsDevPricing(pricing);
+        if (syncCapabilities) {
+          ensureCapabilitiesTable();
+          saveModelsDevCapabilities(capabilities);
+        }
+        lastSyncTime = new Date().toISOString();
+        lastSyncModelCount = modelCount;
+        lastSyncCapabilityCount = capabilityCount;
+      }
+
+      return {
+        success: true,
+        modelCount,
+        providerCount,
+        capabilityCount,
+        dryRun,
+        ...(dryRun ? { data: { pricing, capabilities } } : {}),
+      };
+    } catch (err) {
+      if (signal?.aborted || isAbortError(err)) {
+        return createAbortedSyncResult(dryRun);
+      }
+
+      lastError = err instanceof Error ? err : new Error(String(err));
+
+      if (attempt < maxRetries) {
+        const delayMs = Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
+        console.warn(
+          `[MODELS_DEV] Sync attempt ${attempt + 1} failed, retrying in ${delayMs}ms:`,
+          lastError.message
+        );
+        try {
+          await sleepWithAbort(delayMs, signal);
+        } catch (sleepError) {
+          if (signal?.aborted || isAbortError(sleepError)) {
+            return createAbortedSyncResult(dryRun);
+          }
+          throw sleepError;
+        }
+      }
+    }
   }
+
+  const message = lastError?.message || "Unknown error";
+  console.warn(`[MODELS_DEV] Sync failed after ${maxRetries + 1} attempts:`, message);
+  return {
+    success: false,
+    modelCount: 0,
+    providerCount: 0,
+    capabilityCount: 0,
+    dryRun,
+    error: message,
+  };
 }
 
 // ─── Periodic sync ───────────────────────────────────────
@@ -617,10 +742,33 @@ export function startPeriodicSync(intervalMs?: number): void {
 
   const interval = intervalMs ?? SYNC_INTERVAL_MS;
   activeSyncIntervalMs = interval;
+  const syncToken = { stopped: false };
+  activePeriodicSyncToken = syncToken;
   console.log(`[MODELS_DEV] Starting periodic sync every ${interval / 1000}s`);
 
+  const launchSync = () => {
+    if (syncToken.stopped) {
+      return Promise.resolve(createAbortedSyncResult(false));
+    }
+
+    if (activeSyncPromise) return activeSyncPromise;
+
+    const controller = new AbortController();
+    activeSyncAbortController = controller;
+    const promise = syncModelsDev({ signal: controller.signal }).finally(() => {
+      if (activeSyncAbortController === controller) {
+        activeSyncAbortController = null;
+      }
+      if (activeSyncPromise === promise) {
+        activeSyncPromise = null;
+      }
+    });
+    activeSyncPromise = promise;
+    return promise;
+  };
+
   // Initial sync (non-blocking)
-  syncModelsDev()
+  launchSync()
     .then((result) => {
       if (result.success) {
         console.log(
@@ -633,7 +781,7 @@ export function startPeriodicSync(intervalMs?: number): void {
     });
 
   syncTimer = setInterval(() => {
-    syncModelsDev()
+    launchSync()
       .then((result) => {
         if (result.success) {
           console.log(`[MODELS_DEV] Periodic sync complete: ${result.modelCount} pricing entries`);
@@ -653,6 +801,16 @@ export function startPeriodicSync(intervalMs?: number): void {
  * Stop periodic sync and cleanup timer.
  */
 export function stopPeriodicSync(): void {
+  if (activePeriodicSyncToken) {
+    activePeriodicSyncToken.stopped = true;
+    activePeriodicSyncToken = null;
+  }
+
+  if (activeSyncAbortController) {
+    activeSyncAbortController.abort();
+    activeSyncAbortController = null;
+  }
+
   if (syncTimer) {
     clearInterval(syncTimer);
     syncTimer = null;
