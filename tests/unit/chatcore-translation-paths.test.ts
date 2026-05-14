@@ -44,6 +44,7 @@ const { resetPayloadRulesConfigForTests, setPayloadRulesConfig } =
   await import("../../open-sse/services/payloadRules.ts");
 const { FORMATS } = await import("../../open-sse/translator/formats.ts");
 const { register, getRequestTranslator } = await import("../../open-sse/translator/registry.ts");
+const { setCustomAliases } = await import("../../open-sse/services/modelDeprecation.ts");
 
 const originalFetch = globalThis.fetch;
 const originalResponsesToOpenAI = getRequestTranslator(FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI);
@@ -255,6 +256,7 @@ function collectTextBlocks(messages) {
 async function resetStorage() {
   clearUpstreamProxyConfigCache();
   resetPayloadRulesConfigForTests();
+  setCustomAliases({});
   register(FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI, originalResponsesToOpenAI, null);
   invalidateCacheControlSettingsCache();
   clearCache();
@@ -895,6 +897,51 @@ test("chatCore logs chat completions endpoint as OpenAI protocol", async () => {
   assert.equal(logEntry.sourceFormat, FORMATS.OPENAI);
 });
 
+test("chatCore strips unsupported params after resolving custom model aliases", async () => {
+  setCustomAliases({ "hairo-rotator": "o3" });
+
+  const { call } = await invokeChatCore({
+    provider: "openai",
+    model: "hairo-rotator",
+    endpoint: "/v1/responses",
+    body: {
+      model: "hairo-rotator",
+      input: "hello",
+      temperature: 0.2,
+      top_p: 0.9,
+      max_output_tokens: 256,
+    },
+    responseFormat: "openai",
+  });
+
+  assert.equal(call.body.model, "o3");
+  assert.equal(call.body.temperature, undefined);
+  assert.equal(call.body.top_p, undefined);
+  assert.equal(call.body.max_tokens, undefined);
+  assert.equal(call.body.max_completion_tokens, 256);
+});
+
+test("chatCore preserves Responses sampling params for models that support them", async () => {
+  const { call } = await invokeChatCore({
+    provider: "openai",
+    model: "gpt-4o-mini",
+    endpoint: "/v1/responses",
+    body: {
+      model: "gpt-4o-mini",
+      input: "hello",
+      temperature: 0.2,
+      top_p: 0.9,
+      max_output_tokens: 256,
+    },
+    responseFormat: "openai",
+  });
+
+  assert.equal(call.body.model, "gpt-4o-mini");
+  assert.equal(call.body.temperature, 0.2);
+  assert.equal(call.body.top_p, 0.9);
+  assert.equal(call.body.max_tokens, 256);
+});
+
 test("chatCore surfaces translation errors with explicit status codes", async () => {
   register(
     FORMATS.OPENAI_RESPONSES,
@@ -1352,6 +1399,57 @@ test("chatCore attaches OmniRoute response metadata headers to non-stream respon
   assert.equal(result.response.headers.get("X-OmniRoute-Tokens-Out"), "3");
   assert.ok(Number(result.response.headers.get("X-OmniRoute-Latency-Ms")) >= 0);
   assert.match(String(result.response.headers.get("X-OmniRoute-Response-Cost")), /^\d+\.\d{10}$/);
+});
+
+test("chatCore rebuilt JSON responses do not reuse upstream framing or request headers", async () => {
+  const { result } = await invokeChatCore({
+    provider: "openai",
+    model: "gpt-4o-mini",
+    body: {
+      model: "gpt-4o-mini",
+      stream: false,
+      messages: [{ role: "user", content: "header framing" }],
+    },
+    responseFormat: "openai",
+    responseFactory() {
+      return new Response(
+        JSON.stringify({
+          id: "chatcmpl_json_headers",
+          object: "chat.completion",
+          model: "gpt-4o-mini",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "ok" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: {
+            prompt_tokens: 4,
+            completion_tokens: 2,
+            total_tokens: 6,
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": "7",
+            "Content-Encoding": "gzip",
+            Connection: "keep-alive",
+            "x-provider-request-id": "chat-123",
+          },
+        }
+      );
+    },
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.response.headers.get("content-length"), null);
+  assert.equal(result.response.headers.get("content-encoding"), null);
+  assert.equal(result.response.headers.get("connection"), null);
+  assert.equal(result.response.headers.get("authorization"), null);
+  assert.equal(result.response.headers.get("x-provider-request-id"), "chat-123");
 });
 
 test("chatCore normalizes tool finish reasons and estimates usage when upstream omits it", async () => {

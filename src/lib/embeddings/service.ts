@@ -12,6 +12,7 @@ import * as log from "@/sse/utils/logger";
 import { toJsonErrorPayload } from "@/shared/utils/upstreamError";
 import { getProviderCredentials, clearRecoveredProviderState } from "@/sse/services/auth";
 import { getProviderNodes } from "@/lib/localDb";
+import { cloneResponseHeadersForRebuiltBody } from "@omniroute/open-sse/utils/responseHeaders.ts";
 
 type ValidatedEmbeddingBody = Record<string, unknown> & { model: string };
 
@@ -140,7 +141,7 @@ export async function createEmbeddingResponse(
     connectionId: options.connectionId || null,
   });
 
-  const responseHeaders = new Headers(result.headers);
+  const responseHeaders = cloneResponseHeadersForRebuiltBody(result.headers);
 
   if (result.success) {
     if (credentials) await clearRecoveredProviderState(credentials);

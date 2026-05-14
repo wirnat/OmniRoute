@@ -167,6 +167,50 @@ test("embeddings route clears stale provider error metadata on success", async (
   }
 });
 
+test("embeddings route drops upstream body framing headers after normalizing JSON", async () => {
+  await resetStorage();
+  await seedOpenAIConnection("embeddings-framing@example.com");
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        data: [{ object: "embedding", index: 0, embedding: [0.1, 0.2] }],
+        usage: { prompt_tokens: 3, total_tokens: 3 },
+      }),
+      {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": "5",
+          "Content-Encoding": "gzip",
+          Connection: "keep-alive",
+          "x-provider-request-id": "embed-123",
+        },
+      }
+    );
+
+  try {
+    const request = new Request("http://localhost/v1/embeddings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "openai/text-embedding-3-small", input: "hello" }),
+    });
+
+    const response = await embeddingsRoute.POST(request);
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.model, "openai/text-embedding-3-small");
+    assert.equal(response.headers.get("content-length"), null);
+    assert.equal(response.headers.get("content-encoding"), null);
+    assert.equal(response.headers.get("connection"), null);
+    assert.equal(response.headers.get("x-provider-request-id"), "embed-123");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("embeddings route uses provider node id for compatible provider credentials", async () => {
   await resetStorage();
 

@@ -13,6 +13,7 @@ import {
   isProviderFailureCode,
 } from "./accountFallback.ts";
 import { errorResponse, unavailableResponse } from "../utils/error.ts";
+import { cloneResponseHeadersForRebuiltBody } from "../utils/responseHeaders.ts";
 import { recordComboIntent, recordComboRequest, getComboMetrics } from "./comboMetrics.ts";
 import { resolveComboConfig, getDefaultComboConfig } from "./comboConfig.ts";
 import { maybeGenerateHandoff, resolveContextRelayConfig } from "./contextHandoff.ts";
@@ -34,6 +35,7 @@ import {
   type ProviderCandidate,
   type ScoringWeights,
 } from "./autoCombo/scoring.ts";
+import { isKiroDeveloperRoleRefusal } from "./kiroRefusal.ts";
 import { supportsToolCalling } from "./modelCapabilities.ts";
 import { getSessionConnection } from "./sessionManager.ts";
 import { generateRoutingHints } from "./manifestAdapter";
@@ -56,6 +58,19 @@ import { normalizeRoutingStrategy } from "../../src/shared/constants/routingStra
 
 // Status codes that should mark round-robin target semaphores as cooling down.
 const TRANSIENT_FOR_SEMAPHORE = [429, 502, 503, 504];
+const COMBO_BAD_REQUEST_FALLBACK_PATTERNS = [
+  /\bprohibited_content\b/i,
+  /request blocked by .*api/i,
+  /provided message roles? is not valid/i,
+  /unsupported .*message role/i,
+  /property ['"][^'"]+['"] is unsupported/i,
+  /failed to validate json/i,
+  /no such tool available/i,
+  /unsupported content part type/i,
+  /tool(?:_call|_use)? .* not (?:available|found)/i,
+  /third-party apps/i,
+];
+
 // Patterns that signal all accounts for a provider are rate-limited / exhausted.
 // Used to detect 503 responses from handleNoCredentials so combo can fallback.
 const ALL_ACCOUNTS_RATE_LIMITED_PATTERNS = [/unavailable/i, /service temporarily unavailable/i];
@@ -68,6 +83,40 @@ function isAllAccountsRateLimitedResponse(
   if (status !== 503) return false;
   if (!contentType?.includes("application/json")) return false;
   return ALL_ACCOUNTS_RATE_LIMITED_PATTERNS.some((p) => p.test(errorText));
+}
+
+function isKiroTarget(provider?: string | null, modelStr?: string | null): boolean {
+  const normalizedProvider = String(provider || "").toLowerCase();
+  const normalizedModel = String(modelStr || "").toLowerCase();
+  return (
+    normalizedProvider === "kiro" ||
+    normalizedModel === "kiro" ||
+    normalizedModel.startsWith("kiro/") ||
+    normalizedModel.startsWith("kr/")
+  );
+}
+
+function extractResponseContentText(message: Record<string, unknown>): string {
+  const content = message.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (!isRecord(part)) return "";
+      if (typeof part.text === "string") return part.text;
+      if (typeof part.content === "string") return part.content;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function shouldFallbackComboBadRequest(status: number, errorText: unknown): boolean {
+  if (status !== 400 || !errorText) return false;
+  const message = String(errorText);
+  return COMBO_BAD_REQUEST_FALLBACK_PATTERNS.some((pattern) => pattern.test(message));
 }
 
 const MAX_COMBO_DEPTH = 3;
@@ -155,7 +204,8 @@ function toTrimmedString(value): string | null {
 export async function validateResponseQuality(
   response: Response,
   isStreaming: boolean,
-  log: { warn?: (...args: unknown[]) => void }
+  log: { warn?: (...args: unknown[]) => void },
+  context: { provider?: string | null; modelStr?: string | null } = {}
 ): Promise<{ valid: boolean; reason?: string; clonedResponse?: Response }> {
   if (isStreaming) return { valid: true };
 
@@ -216,6 +266,13 @@ export async function validateResponseQuality(
 
   if (!hasContent && !hasToolCalls) {
     return { valid: false, reason: "empty content and no tool_calls in response" };
+  }
+
+  if (
+    isKiroTarget(context.provider, context.modelStr) &&
+    isKiroDeveloperRoleRefusal(extractResponseContentText(message as Record<string, unknown>))
+  ) {
+    return { valid: false, reason: "kiro developer-role refusal response" };
   }
 
   return {
@@ -1500,9 +1557,10 @@ export async function handleComboChat({
                 ...json,
                 choices: [{ ...choice, message: taggedMsg }, ...(json.choices?.slice(1) || [])],
               };
+              const headers = cloneResponseHeadersForRebuiltBody(res.headers);
               return new Response(JSON.stringify(updatedJson), {
                 status: res.status,
-                headers: res.headers,
+                headers,
               });
             }
           } catch {
@@ -1630,7 +1688,7 @@ export async function handleComboChat({
 
         const transformedStream = res.body.pipeThrough(transform).pipeThrough(sanitize);
         // Add model info as response header for clients that support it
-        const headers = new Headers(res.headers);
+        const headers = cloneResponseHeadersForRebuiltBody(res.headers);
         headers.set("X-OmniRoute-Model", modelStr);
         return new Response(transformedStream, {
           status: res.status,
@@ -1992,7 +2050,10 @@ export async function handleComboChat({
 
       // Success — validate response quality before returning
       if (result.ok) {
-        const quality = await validateResponseQuality(result, clientRequestedStream, log);
+        const quality = await validateResponseQuality(result, clientRequestedStream, log, {
+          provider,
+          modelStr,
+        });
         if (!quality.valid) {
           log.warn(
             "COMBO",
@@ -2363,7 +2424,10 @@ async function handleRoundRobinCombo({
 
         // Success — validate response quality before returning
         if (result.ok) {
-          const quality = await validateResponseQuality(result, clientRequestedStream, log);
+          const quality = await validateResponseQuality(result, clientRequestedStream, log, {
+            provider,
+            modelStr,
+          });
           if (!quality.valid) {
             log.warn(
               "COMBO-RR",
@@ -2416,7 +2480,7 @@ async function handleRoundRobinCombo({
               }
             })();
           }
-          return result;
+          return quality.clonedResponse ?? result;
         }
 
         // Extract error info

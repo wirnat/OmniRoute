@@ -9,6 +9,7 @@ import {
   COLORS,
   withBodyTimeout,
 } from "../utils/stream.ts";
+import { cloneResponseHeadersForRebuiltBody } from "../utils/responseHeaders.ts";
 import { ensureStreamReadiness } from "../utils/streamReadiness.ts";
 import { createStreamController, pipeWithDisconnect } from "../utils/streamHandler.ts";
 import { createSseHeartbeatTransform } from "../utils/sseHeartbeat.ts";
@@ -2545,8 +2546,10 @@ export async function handleChatCore({
     }
   }
 
-  // Strip unsupported parameters for reasoning models (o1, o3, etc.)
-  const unsupported = getUnsupportedParams(provider, model);
+  // Strip against the final upstream model, not the client-facing alias. A custom alias
+  // such as `hairo-rotator -> o3` must inherit o3's stricter parameter surface.
+  const unsupportedModel = finalModelToUpstream || effectiveModel || model;
+  const unsupported = getUnsupportedParams(provider, unsupportedModel);
   if (unsupported.length > 0) {
     const stripped: string[] = [];
     for (const param of unsupported) {
@@ -2556,7 +2559,10 @@ export async function handleChatCore({
       }
     }
     if (stripped.length > 0) {
-      log?.warn?.("PARAMS", `Stripped unsupported params for ${model}: ${stripped.join(", ")}`);
+      log?.warn?.(
+        "PARAMS",
+        `Stripped unsupported params for ${unsupportedModel}: ${stripped.join(", ")}`
+      );
     }
   }
 
@@ -3970,19 +3976,24 @@ export async function handleChatCore({
     return {
       success: true,
       response: new Response(JSON.stringify(translatedResponse), {
-        headers: {
-          ...Object.fromEntries(providerHeaders.entries()),
-          "Content-Type": "application/json",
-          [OMNIROUTE_RESPONSE_HEADERS.cache]: "MISS",
-          ...buildOmniRouteResponseMetaHeaders({
-            provider,
-            model,
-            cacheHit: false,
-            latencyMs: Date.now() - startTime,
-            usage: responseUsage,
-            costUsd: estimatedCost,
-          }),
-        },
+        headers: (() => {
+          const headers = cloneResponseHeadersForRebuiltBody(providerResponse.headers);
+          headers.set("Content-Type", "application/json");
+          headers.set(OMNIROUTE_RESPONSE_HEADERS.cache, "MISS");
+          for (const [key, value] of Object.entries(
+            buildOmniRouteResponseMetaHeaders({
+              provider,
+              model,
+              cacheHit: false,
+              latencyMs: Date.now() - startTime,
+              usage: responseUsage,
+              costUsd: estimatedCost,
+            })
+          )) {
+            headers.set(key, value);
+          }
+          return headers;
+        })(),
       }),
     };
   }
@@ -4036,26 +4047,24 @@ export async function handleChatCore({
     await onRequestSuccess();
   }
 
-  const responseHeaders: Record<string, string> = {
-    ...Object.fromEntries(
-      Array.from(providerResponse.headers.entries()).filter(
-        ([k]) => k.toLowerCase() !== "content-type"
-      )
-    ),
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
-    "X-Accel-Buffering": "no",
-    [OMNIROUTE_RESPONSE_HEADERS.cache]: "MISS",
-    ...buildOmniRouteResponseMetaHeaders({
+  const responseHeaders = cloneResponseHeadersForRebuiltBody(providerResponse.headers);
+  responseHeaders.set("Content-Type", "text/event-stream");
+  responseHeaders.set("Cache-Control", "no-cache, no-transform");
+  responseHeaders.set("Connection", "keep-alive");
+  responseHeaders.set("X-Accel-Buffering", "no");
+  responseHeaders.set(OMNIROUTE_RESPONSE_HEADERS.cache, "MISS");
+  for (const [key, value] of Object.entries(
+    buildOmniRouteResponseMetaHeaders({
       provider,
       model,
       cacheHit: false,
       latencyMs: 0,
       usage: null,
       costUsd: 0,
-    }),
-  };
+    })
+  )) {
+    responseHeaders.set(key, value);
+  }
 
   // Create transform stream with logger for streaming response
   let transformStream;
@@ -4268,7 +4277,7 @@ export async function handleChatCore({
     // Chain: provider → transform → progress → client
     const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController);
     finalStream = transformedBody.pipeThrough(progressTransform);
-    responseHeaders[OMNIROUTE_RESPONSE_HEADERS.progress] = "enabled";
+    responseHeaders.set(OMNIROUTE_RESPONSE_HEADERS.progress, "enabled");
   } else {
     finalStream = pipeWithDisconnect(providerResponse, transformStream, streamController);
   }
