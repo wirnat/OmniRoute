@@ -197,7 +197,7 @@ export default function LoginPage() {
               <Button
                 variant="primary"
                 className="w-full h-11 text-sm font-medium"
-                onClick={() => router.push("/dashboard/settings?tab=security")}
+                onClick={() => router.push("/dashboard/onboarding")}
               >
                 {t("configurePassword")}
               </Button>

@@ -59,6 +59,20 @@ function getDispatcherOptions() {
   };
 }
 
+function getProxyDispatcherOptions() {
+  const options = getDispatcherOptions();
+  // Disable keep-alive and pipelining for proxy connections.
+  // Cheap proxy servers aggressively drop idle sockets without sending TCP RST,
+  // causing "socket hang up" or "Client network socket disconnected" errors
+  // on subsequent requests that try to reuse the pooled connection.
+  return {
+    ...options,
+    keepAliveTimeout: 1,
+    keepAliveMaxTimeout: 1,
+    pipelining: 0,
+  };
+}
+
 export function getDefaultDispatcher(): Dispatcher {
   const globalWithCache = globalThis as GlobalWithDispatcherCache;
   if (!globalWithCache[DEFAULT_DISPATCHER_KEY]) {
@@ -218,7 +232,7 @@ export function proxyConfigToUrl(
 export function createProxyDispatcher(proxyUrl: string): Dispatcher {
   const normalizedUrl = normalizeProxyUrl(proxyUrl, "proxy dispatcher");
   const dispatcherCache = getDispatcherCache();
-  const dispatcherOptions = getDispatcherOptions();
+  const proxyDispatcherOptions = getProxyDispatcherOptions();
 
   let dispatcher = dispatcherCache.get(normalizedUrl);
   if (dispatcher) return dispatcher;
@@ -237,12 +251,12 @@ export function createProxyDispatcher(proxyUrl: string): Dispatcher {
     if (parsed.password) socksOptions.password = decodeURIComponent(parsed.password);
     dispatcher = socksDispatcher(
       socksOptions as Parameters<typeof socksDispatcher>[0],
-      dispatcherOptions
+      proxyDispatcherOptions
     ) as Dispatcher;
   } else {
     dispatcher = new ProxyAgent({
       uri: normalizedUrl,
-      ...dispatcherOptions,
+      ...proxyDispatcherOptions,
     });
   }
 

@@ -2,6 +2,7 @@ import {
   getAllProviderLimitsCache,
   getProviderConnectionById,
   getProviderConnections,
+  getProviderLimitsCache,
   getSettings,
   resolveProxyForConnection,
   setProviderLimitsCache,
@@ -12,6 +13,7 @@ import {
 } from "@/lib/localDb";
 import { syncToCloud } from "@/lib/cloudSync";
 import { setQuotaCache } from "@/domain/quotaCache";
+import { buildClaudeExtraUsageConnectionUpdate } from "@/lib/providers/claudeExtraUsage";
 import { getMachineId } from "@/shared/utils/machine";
 import { USAGE_SUPPORTED_PROVIDERS } from "@/shared/constants/providers";
 import { getExecutor } from "@omniroute/open-sse/executors/index.ts";
@@ -33,9 +35,25 @@ interface ProviderConnectionLike {
   providerSpecificData?: JsonRecord;
   testStatus?: string;
   isActive?: boolean;
+  lastError?: string | null;
+  lastErrorAt?: string | null;
+  lastErrorType?: string | null;
+  lastErrorSource?: string | null;
+  errorCode?: string | number | null;
+  rateLimitedUntil?: string | null;
+  backoffLevel?: number;
 }
 
-const PROVIDER_LIMITS_APIKEY_PROVIDERS = new Set(["glm", "glmt"]);
+const PROVIDER_LIMITS_APIKEY_PROVIDERS = new Set([
+  "glm",
+  "glm-cn",
+  "glmt",
+  "minimax",
+  "minimax-cn",
+  "crof",
+  "nanogpt",
+  "deepseek",
+]);
 const DEFAULT_PROVIDER_LIMITS_SYNC_INTERVAL_MINUTES = 70;
 const PROVIDER_LIMITS_AUTO_SYNC_SETTING_KEY = "provider_limits_auto_sync_last_run";
 
@@ -187,6 +205,57 @@ async function syncExpiredStatusIfNeeded(connection: ProviderConnectionLike, usa
   }
 }
 
+async function syncClaudeExtraUsageStateIfNeeded(
+  connection: ProviderConnectionLike,
+  usage: JsonRecord
+): Promise<ProviderConnectionLike> {
+  const update = buildClaudeExtraUsageConnectionUpdate(connection, usage);
+  if (!update) return connection;
+
+  await updateProviderConnection(connection.id, update);
+  return {
+    ...connection,
+    ...update,
+  };
+}
+
+/** Persist refreshed Claude bootstrap fields into psd; writes only on diff. */
+async function syncClaudeBootstrapIfNeeded(
+  connection: ProviderConnectionLike,
+  usage: JsonRecord
+): Promise<ProviderConnectionLike> {
+  if (connection.provider !== "claude") return connection;
+  const bootstrap = usage?.bootstrap as Record<string, string | null> | null | undefined;
+  if (!bootstrap || typeof bootstrap !== "object") return connection;
+
+  const psd = (connection.providerSpecificData || {}) as JsonRecord;
+  const mapping: Array<[keyof typeof bootstrap, string]> = [
+    ["account_uuid", "accountUUID"],
+    ["organization_uuid", "organizationUUID"],
+    ["organization_name", "organizationName"],
+    ["organization_type", "organizationType"],
+    ["organization_rate_limit_tier", "organizationRateLimitTier"],
+  ];
+
+  const nextPsd: JsonRecord = { ...psd };
+  let changed = false;
+  for (const [bsKey, psdKey] of mapping) {
+    const next = bootstrap[bsKey];
+    if (typeof next === "string" && next.length > 0 && psd[psdKey] !== next) {
+      nextPsd[psdKey] = next;
+      changed = true;
+    }
+  }
+
+  if (!changed) return connection;
+
+  await updateProviderConnection(connection.id, { providerSpecificData: nextPsd });
+  return {
+    ...connection,
+    providerSpecificData: nextPsd,
+  };
+}
+
 export function getProviderLimitsSyncIntervalMinutes(): number {
   const raw = Number.parseInt(process.env.PROVIDER_LIMITS_SYNC_INTERVAL_MINUTES ?? "", 10);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_PROVIDER_LIMITS_SYNC_INTERVAL_MINUTES;
@@ -218,6 +287,16 @@ export async function fetchLiveProviderLimits(connectionId: string): Promise<{
   connection: ProviderConnectionLike;
   usage: JsonRecord;
 }> {
+  return fetchLiveProviderLimitsWithOptions(connectionId, { forceRefresh: false });
+}
+
+async function fetchLiveProviderLimitsWithOptions(
+  connectionId: string,
+  options: { forceRefresh?: boolean } = {}
+): Promise<{
+  connection: ProviderConnectionLike;
+  usage: JsonRecord;
+}> {
   let connection = (await getProviderConnectionById(connectionId)) as ProviderConnectionLike | null;
   if (!connection) {
     throw withStatus(new Error("Connection not found"), 404);
@@ -228,11 +307,13 @@ export async function fetchLiveProviderLimits(connectionId: string): Promise<{
   }
 
   if (connection.authType !== "oauth") {
-    const usage = (await getUsageForProvider(connection)) as JsonRecord;
+    const usage = (await getUsageForProvider(connection, options)) as JsonRecord;
     if (isRecord(usage.quotas)) {
       setQuotaCache(connectionId, connection.provider, usage.quotas);
     }
     await syncExpiredStatusIfNeeded(connection, usage);
+    connection = await syncClaudeExtraUsageStateIfNeeded(connection, usage);
+    connection = await syncClaudeBootstrapIfNeeded(connection, usage);
     return { connection, usage };
   }
 
@@ -251,7 +332,7 @@ export async function fetchLiveProviderLimits(connectionId: string): Promise<{
         await syncToCloudIfEnabled();
       }
 
-      const usageData = (await getUsageForProvider(conn)) as JsonRecord;
+      const usageData = (await getUsageForProvider(conn, options)) as JsonRecord;
       connection = conn;
       return { usage: usageData };
     });
@@ -291,6 +372,8 @@ export async function fetchLiveProviderLimits(connectionId: string): Promise<{
     setQuotaCache(connectionId, connection.provider, result.usage.quotas);
   }
   await syncExpiredStatusIfNeeded(connection, result.usage);
+  connection = await syncClaudeExtraUsageStateIfNeeded(connection, result.usage);
+  connection = await syncClaudeBootstrapIfNeeded(connection, result.usage);
 
   return {
     connection,
@@ -306,10 +389,36 @@ export async function fetchAndPersistProviderLimits(
   usage: JsonRecord;
   cache: ProviderLimitsCacheEntry;
 }> {
-  const { connection, usage } = await fetchLiveProviderLimits(connectionId);
-  const cache = toProviderLimitsCacheEntry(usage, source);
-  setProviderLimitsCache(connectionId, cache);
-  return { connection, usage, cache };
+  const { connection, usage } = await fetchLiveProviderLimitsWithOptions(connectionId, {
+    forceRefresh: source === "manual",
+  });
+  const newCache = toProviderLimitsCacheEntry(usage, source);
+
+  // Don't persist error-only entries (429 etc.) — would wipe prior good cache.
+  // Serve the prior entry instead; only successful fetches update the cache.
+  const fetchFailed = !newCache.quotas && newCache.message;
+  if (fetchFailed) {
+    const previous = getProviderLimitsCache(connectionId);
+    if (previous?.quotas && Object.keys(previous.quotas).length > 0) {
+      // utils.tsx parseQuotaData ignores `quotas` if `message` is set — drop
+      // the message so the prior quotas render; surface staleness via _stale.
+      const staleUsage: JsonRecord = {
+        ...usage,
+        quotas: previous.quotas,
+        plan: previous.plan ?? usage.plan ?? null,
+        message: null,
+        _stale: true,
+        _staleSince: previous.fetchedAt,
+        _staleReason: newCache.message,
+      };
+      return { connection, usage: staleUsage, cache: previous };
+    }
+    // No prior cache; pass the error response through without persisting it.
+    return { connection, usage, cache: newCache };
+  }
+
+  setProviderLimitsCache(connectionId, newCache);
+  return { connection, usage, cache: newCache };
 }
 
 export async function syncAllProviderLimits(
@@ -336,7 +445,9 @@ export async function syncAllProviderLimits(
     const chunk = connections.slice(i, i + concurrency);
     const results = await Promise.allSettled(
       chunk.map(async (connection) => {
-        const { usage } = await fetchLiveProviderLimits(connection.id);
+        const { usage } = await fetchLiveProviderLimitsWithOptions(connection.id, {
+          forceRefresh: source === "manual",
+        });
         const cache = toProviderLimitsCacheEntry(usage, source);
         return { connectionId: connection.id, cache };
       })
@@ -347,11 +458,19 @@ export async function syncAllProviderLimits(
       if (!connectionId) return;
 
       if (result.status === "fulfilled") {
-        cacheEntries.push({
-          connectionId: result.value.connectionId,
-          entry: result.value.cache,
-        });
-        caches[result.value.connectionId] = result.value.cache;
+        const { cache } = result.value;
+        // Don't persist error-only entries; show prior cache or pass through.
+        if (!cache.quotas && cache.message) {
+          const previous = getProviderLimitsCache(connectionId);
+          if (previous?.quotas && Object.keys(previous.quotas).length > 0) {
+            caches[connectionId] = previous;
+          } else {
+            caches[connectionId] = cache;
+          }
+          return;
+        }
+        cacheEntries.push({ connectionId, entry: cache });
+        caches[connectionId] = cache;
         return;
       }
 

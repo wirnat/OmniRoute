@@ -8,15 +8,16 @@ Common problems and solutions for OmniRoute.
 
 ## Quick Fixes
 
-| Problem                       | Solution                                                                                  |
-| ----------------------------- | ----------------------------------------------------------------------------------------- |
-| First login not working       | Set `INITIAL_PASSWORD` in `.env` (no hardcoded default)                                   |
-| Dashboard opens on wrong port | Set `PORT=20128` and `NEXT_PUBLIC_BASE_URL=http://localhost:20128`                        |
-| No request logs under `logs/` | Set `ENABLE_REQUEST_LOGS=true`                                                            |
-| EACCES: permission denied     | Set `DATA_DIR=/path/to/writable/dir` to override `~/.omniroute`                           |
-| Routing strategy not saving   | Update to v1.4.11+ (Zod schema fix for settings persistence)                              |
-| Login crash / blank page      | You may be on Node.js 24+ — see [Node.js Compatibility](#nodejs-compatibility) below      |
-| Proxy "fetch failed"          | Ensure proxy config is set at the correct level — see [Proxy Issues](#proxy-issues) below |
+| Problem                                             | Solution                                                                                                                                                 |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| First login not working                             | Set `INITIAL_PASSWORD` in `.env` (no hardcoded default)                                                                                                  |
+| Dashboard opens on wrong port                       | Set `PORT=20128` and `NEXT_PUBLIC_BASE_URL=http://localhost:20128`                                                                                       |
+| No logs written to disk                             | Set `APP_LOG_TO_FILE=true` and verify call log capture is enabled                                                                                        |
+| EACCES: permission denied                           | Set `DATA_DIR=/path/to/writable/dir` to override `~/.omniroute`                                                                                          |
+| Routing strategy not saving                         | Update to v1.4.11+ (Zod schema fix for settings persistence)                                                                                             |
+| Login crash / blank page                            | Check Node.js version — see [Node.js Compatibility](#nodejs-compatibility) below                                                                         |
+| `dlopen` / `slice is not valid mach-o file` (macOS) | Run `cd $(npm root -g)/omniroute/app && npm rebuild better-sqlite3 && omniroute` — see [macOS native module rebuild](#macos-native-module-rebuild) below |
+| Proxy "fetch failed"                                | Ensure proxy config is set at the correct level — see [Proxy Issues](#proxy-issues) below                                                                |
 
 ---
 
@@ -26,26 +27,52 @@ Common problems and solutions for OmniRoute.
 
 ### Login page crashes or shows "Module self-registration" error
 
-**Cause:** You are running Node.js 24+. The `better-sqlite3` native binary is not compatible with Node.js 24, which causes a fatal crash when the server tries to initialize the database.
+**Cause:** You are running a Node.js version outside OmniRoute's approved secure runtime floor. The most common case is running an older Node 20, 22, or 24 patch level that falls below the patched security floor OmniRoute requires.
 
 **Symptoms:**
 
 - Login page shows a blank screen or a server error
 - Console shows `Error: Module did not self-register` or similar native binding errors
-- Starting with v3.5.5, the login page shows an **orange warning banner** with your Node version if incompatibility is detected
+- The login page shows an **orange warning banner** with your Node version if the runtime is outside the supported secure policy
 
 **Fix:**
 
-1. Install Node.js 22 LTS (recommended):
+1. Install a supported Node.js LTS release (recommended: Node.js 24.x):
    ```bash
-   nvm install 22
-   nvm use 22
+   nvm install 24
+   nvm use 24
    ```
-2. Verify your version: `node --version` should show `v22.x.x`
+2. Verify your version: `node --version` should show `v24.0.0` or newer on the 24.x LTS line
 3. Reinstall OmniRoute: `npm install -g omniroute`
 4. Restart: `omniroute`
 
-> **Supported versions:** Node.js 18, 20, or 22 LTS. Node.js 24+ is **not supported**.
+> **Supported secure versions:** `>=20.20.2 <21`, `>=22.22.2 <23`, or `>=24.0.0 <25`. Node.js 24.x LTS (Krypton) is fully supported.
+
+### macOS: `dlopen` / "slice is not valid mach-o file"
+
+<a name="macos-native-module-rebuild"></a>
+
+**Cause:** After a global `npm install -g omniroute`, the `better-sqlite3` native binary inside the package may have been compiled for a different architecture or Node.js ABI than what is running locally. This is common on macOS (both Apple Silicon and Intel) when the pre-built binary does not match your environment.
+
+**Symptoms:**
+
+- Server fails immediately on startup with a `dlopen` error
+- Error contains `slice is not valid mach-o file`
+- Full example:
+
+```
+dlopen(/Users/<user>/.nvm/versions/node/v24.14.1/lib/node_modules/omniroute/app/node_modules/better-sqlite3/build/Release/better_sqlite3.node, 0x0001): tried: '...' (slice is not valid mach-o file)
+```
+
+**Fix — rebuild for your local environment (no Node.js downgrade required):**
+
+```bash
+cd $(npm root -g)/omniroute/app
+npm rebuild better-sqlite3
+omniroute
+```
+
+> **Note:** This recompiles the native binding against your local Node.js version and CPU architecture, resolving the binary mismatch. The officially supported range is **`>=20.20.2 <21`, `>=22.22.2 <23`, or `>=24.0.0 <25`** (`engines` field in `package.json`). Node.js 24.x LTS (Krypton) is fully supported with `better-sqlite3` v12.x.
 
 ---
 
@@ -159,9 +186,13 @@ curl -s http://localhost:20128/api/cli-tools/openclaw-settings | jq '{installed,
 
 ## Debugging
 
-### Enable Request Logs
+### Enable Log Files
 
-Set `ENABLE_REQUEST_LOGS=true` in your `.env` file. Logs appear under `logs/` directory.
+Set `APP_LOG_TO_FILE=true` in your `.env` file. Application logs are written under `logs/`.
+Request artifacts are stored under `${DATA_DIR}/call_logs/` when the call log pipeline is
+enabled in settings.
+When pipeline capture is enabled, set `CALL_LOG_PIPELINE_CAPTURE_STREAM_CHUNKS=false` to omit
+stream chunk payloads, or tune `CALL_LOG_PIPELINE_MAX_SIZE_KB` to change the artifact cap in KB.
 
 ### Check Provider Health
 
@@ -176,8 +207,9 @@ curl http://localhost:20128/api/monitoring/health
 ### Runtime Storage
 
 - Main state: `${DATA_DIR}/storage.sqlite` (providers, combos, aliases, keys, settings)
-- Usage: SQLite tables in `storage.sqlite` (`usage_history`, `call_logs`, `proxy_logs`) + optional `${DATA_DIR}/log.txt` and `${DATA_DIR}/call_logs/`
-- Request logs: `<repo>/logs/...` (when `ENABLE_REQUEST_LOGS=true`)
+- Usage: SQLite tables in `storage.sqlite` (`usage_history`, `call_logs`, `proxy_logs`) + optional `${DATA_DIR}/call_logs/`
+- Application logs: `<repo>/logs/...` (when `APP_LOG_TO_FILE=true`)
+- Call log artifacts: `${DATA_DIR}/call_logs/YYYY-MM-DD/...` when the call log pipeline is enabled
 
 ---
 

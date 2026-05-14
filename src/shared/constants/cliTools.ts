@@ -65,7 +65,6 @@ export const CLI_TOOLS = {
   codex: {
     id: "codex",
     name: "OpenAI Codex CLI",
-    image: "/providers/codex.png",
     color: "#10A37F",
     description: "OpenAI Codex CLI",
     docsUrl: "https://github.com/openai/codex",
@@ -75,7 +74,7 @@ export const CLI_TOOLS = {
   droid: {
     id: "droid",
     name: "Factory Droid",
-    image: "/providers/droid.png",
+    image: "/providers/droid.svg",
     color: "#00D4FF",
     description: "Factory Droid AI Assistant",
     docsUrl: "/docs?section=cli-tools&tool=droid",
@@ -121,7 +120,6 @@ export const CLI_TOOLS = {
   windsurf: {
     id: "windsurf",
     name: "Windsurf",
-    image: "/providers/windsurf.svg",
     color: "#4A90E2",
     description: "Windsurf AI-first IDE by Codeium",
     docsUrl: "https://windsurf.com/",
@@ -151,7 +149,6 @@ export const CLI_TOOLS = {
   cline: {
     id: "cline",
     name: "Cline",
-    image: "/providers/cline.png",
     color: "#00D1B2",
     description: "Cline AI Coding Assistant CLI",
     docsUrl: "https://docs.cline.bot/",
@@ -161,7 +158,7 @@ export const CLI_TOOLS = {
   kilo: {
     id: "kilo",
     name: "Kilo Code",
-    image: "/providers/kilocode.png",
+    image: "/providers/kilocode.svg",
     color: "#FF6B6B",
     description: "Kilo Code AI Assistant CLI",
     docsUrl: "/docs?section=cli-tools&tool=kilocode",
@@ -200,7 +197,6 @@ export const CLI_TOOLS = {
   antigravity: {
     id: "antigravity",
     name: "Antigravity",
-    image: "/providers/antigravity.png",
     color: "#4285F4",
     description: "Google Antigravity IDE with MITM",
     docsUrl: "/docs?section=cli-tools&tool=antigravity",
@@ -242,13 +238,17 @@ export const CLI_TOOLS = {
   opencode: {
     id: "opencode",
     name: "OpenCode",
-    image: "/providers/opencode.png",
+    imageLight: "/providers/opencode-light.svg",
+    imageDark: "/providers/opencode-dark.svg",
     icon: "terminal",
     color: "#FF6B35",
     description: "OpenCode AI coding agent (Terminal)",
     docsUrl: "/docs?section=cli-tools&tool=opencode",
     configType: "guide",
     defaultCommand: "opencode",
+    modelSelectionMode: "multiple",
+    hideComboModels: true,
+    previewConfigMode: "opencode",
     notes: [
       {
         type: "warning",
@@ -273,19 +273,58 @@ export const CLI_TOOLS = {
     codeBlock: {
       language: "json",
       code: `{
-  "providers": {
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
     "omniroute": {
+      "npm": "@ai-sdk/openai-compatible",
       "name": "OmniRoute",
-      "api": "openai",
-      "baseURL": "{{baseUrl}}",
-      "apiKey": "{{apiKey}}",
-      "models": [
-        "{{model}}",
-        "claude-sonnet-4-5-thinking",
-        "gemini-3.1-pro-high",
-        "gemini-3-flash"
-      ]
+      "options": {
+        "baseURL": "{{baseUrl}}",
+        "apiKey": "{{apiKey}}"
+      },
+      "models": {
+        "{{model}}": { "name": "{{model}}" },
+        "claude-sonnet-4-5-thinking": { "name": "claude-sonnet-4-5-thinking" },
+        "gemini-3.1-pro-high": { "name": "gemini-3.1-pro-high" },
+        "gemini-3-flash": { "name": "gemini-3-flash" }
+      }
     }
+  }
+}`,
+    },
+  },
+  hermes: {
+    id: "hermes",
+    name: "Hermes",
+    icon: "terminal",
+    color: "#8B5CF6",
+    description: "Hermes coding agent quick configuration",
+    docsUrl: "/docs?section=cli-tools&tool=hermes",
+    configType: "guide",
+    defaultCommand: "hermes",
+    guideSteps: [
+      {
+        step: 1,
+        title: "Open Hermes Config",
+        desc: "Open your Hermes configuration file or create one if this is the first run.",
+      },
+      { step: 2, title: "API Key", type: "apiKeySelector" },
+      { step: 3, title: "Base URL", value: "{{baseUrl}}", copyable: true },
+      { step: 4, title: "Select Model", type: "modelSelector" },
+      {
+        step: 5,
+        title: "Save Provider Block",
+        desc: "Use the JSON block below as the OpenAI-compatible provider definition for OmniRoute.",
+      },
+    ],
+    codeBlock: {
+      language: "json",
+      code: `{
+  "provider": {
+    "type": "openai",
+    "baseURL": "{{baseUrl}}",
+    "apiKey": "{{apiKey}}",
+    "model": "{{model}}"
   }
 }`,
     },
@@ -338,7 +377,7 @@ amp --model "{{model}}"
   kiro: {
     id: "kiro",
     name: "Kiro AI",
-    image: "/providers/kiro.png",
+    image: "/providers/kiro.svg",
     icon: "psychology_alt",
     color: "#FF6B35",
     description: "Amazon Kiro — AI-powered IDE with MITM",
@@ -461,50 +500,30 @@ amp --model "{{model}}"
     ],
     codeBlock: {
       language: "json",
-      code: `# ~/.qwen/settings.json — OmniRoute as multi-provider
+      code: `# ~/.qwen/settings.json — OmniRoute via security.auth
 {
-  "modelProviders": {
-    "openai": [{
-      "id": "{{model}}",
-      "name": "OmniRoute",
-      "envKey": "OPENAI_API_KEY",
-      "baseUrl": "{{baseUrl}}",
-      "generationConfig": { "contextWindowSize": 200000 }
-    }],
-    "anthropic": [{
-      "id": "claude-sonnet-4-6",
-      "name": "Claude Sonnet 4.6",
-      "envKey": "ANTHROPIC_API_KEY",
-      "baseUrl": "{{baseUrl}}",
-      "generationConfig": { "contextWindowSize": 200000 }
-    }],
-    "gemini": [{
-      "id": "gemini-3-flash",
-      "name": "Gemini 3 Flash",
-      "envKey": "GEMINI_API_KEY",
+  "security": {
+    "auth": {
+      "selectedType": "openai",
+      "apiKey": "{{apiKey}}",
       "baseUrl": "{{baseUrl}}"
-    }]
+    }
+  },
+  "model": {
+    "name": "{{model}}"
   }
 }`,
     },
   },
-  // HIDDEN: gemini-cli
-  // "gemini-cli": {
-  //   id: "gemini-cli",
-  //   name: "Gemini CLI",
-  //   icon: "terminal",
-  //   color: "#4285F4",
-  //   description: "Google Gemini CLI",
-  //   configType: "env",
-  //   envVars: {
-  //     baseUrl: "GEMINI_API_BASE_URL",
-  //     model: "GEMINI_MODEL",
-  //   },
-  //   defaultModels: [
-  //     { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", alias: "pro" },
-  //     { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", alias: "flash" },
-  //   ],
-  // },
+  custom: {
+    id: "custom",
+    name: "Custom CLI",
+    icon: "terminal",
+    color: "#10B981",
+    description: "Generic OpenAI-compatible CLI or SDK configuration generator",
+    docsUrl: "/docs?section=cli-tools",
+    configType: "custom-builder",
+  },
 };
 
 // Get all provider models for mapping dropdown
