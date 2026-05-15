@@ -10,6 +10,8 @@
  * updates the DB, and logs the result.
  */
 
+import fs from "node:fs";
+import { DATA_DIR } from "@/lib/db/core";
 import {
   getProviderConnections,
   updateProviderConnection,
@@ -158,6 +160,7 @@ export function stopTokenHealthCheck() {
 // ── Core sweep ───────────────────────────────────────────────────────────────
 async function sweep() {
   try {
+    if (!fs.existsSync(DATA_DIR)) return;
     const connections = await getProviderConnections({ authType: "oauth" });
 
     if (!connections || connections.length === 0) return;

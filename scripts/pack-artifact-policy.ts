@@ -84,6 +84,7 @@ export const PACK_ARTIFACT_ROOT_ALLOWED_EXACT_PATHS: string[] = [
 ];
 
 export const PACK_ARTIFACT_ROOT_ALLOWED_PATH_PREFIXES: string[] = [
+  "bin/cli/",
   "open-sse/mcp-server/schemas/",
   "open-sse/mcp-server/tools/",
   "src/shared/contracts/",

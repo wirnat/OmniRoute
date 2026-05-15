@@ -100,7 +100,7 @@ function injectJsonResponseInstructions(messages, responseFormat) {
   if (!responseFormat || typeof responseFormat !== "object") return safeMessages;
 
   let formatInstruction =
-    "Respond only with valid JSON. Do not include any text before or after the JSON object.";
+    "Respond only with valid JSON. Do not include extra text before or after the JSON object.";
   if (responseFormat.type === "json_schema") {
     const schema =
       responseFormat?.json_schema?.schema ??
@@ -112,7 +112,7 @@ function injectJsonResponseInstructions(messages, responseFormat) {
         schema,
         null,
         2
-      )}\nDo not include any text before or after the JSON object.`;
+      )}\nDo not include extra text before or after the JSON object.`;
     }
   } else if (responseFormat.type !== "json_object") {
     return safeMessages;
