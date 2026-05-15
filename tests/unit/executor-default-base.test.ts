@@ -715,6 +715,39 @@ test("DefaultExecutor.transformRequest neutralizes incompatible tool_choice for 
   assert.equal((result as any).tool_choice, "auto");
 });
 
+test("DefaultExecutor.transformRequest downgrades DeepSeek json_schema response_format to json_object", () => {
+  const executor = new DefaultExecutor("deepseek");
+  const body = {
+    messages: [{ role: "user", content: "Return the queue status as JSON." }],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "queue_status",
+        schema: {
+          type: "object",
+          properties: {
+            queue_number: { type: "integer" },
+            status: { type: "string" },
+          },
+          required: ["queue_number", "status"],
+        },
+      },
+    },
+  };
+
+  const result = executor.transformRequest("deepseek-chat", body, true, {});
+
+  assert.notEqual(result, body);
+  assert.deepEqual(result.response_format, { type: "json_object" });
+  assert.equal(result.messages[0].role, "system");
+  assert.match(
+    result.messages[0].content,
+    /Respond only with valid JSON that matches this schema:/
+  );
+  assert.match(result.messages[0].content, /"queue_number"/);
+  assert.equal(result.messages[1].role, "user");
+});
+
 test("DefaultExecutor.transformRequest applies GLMT preset defaults without overriding explicit values", () => {
   const executor = new DefaultExecutor("glmt");
 

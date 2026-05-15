@@ -118,6 +118,107 @@ test("translateRequest sanitizes tools before Claude output", () => {
   assert.equal(translated.tools[0].input_schema.properties.count.maximum, 9);
 });
 
+test("translateRequest maps OpenAI json_schema response_format to Claude output_config.format", () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      direct_reply: { type: "boolean" },
+    },
+    required: ["direct_reply"],
+  };
+
+  const translated = translateRequest(
+    FORMATS.OPENAI,
+    FORMATS.CLAUDE,
+    "claude-haiku-4-5",
+    {
+      messages: [{ role: "user", content: "hello" }],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "planner_reply",
+          schema,
+          strict: true,
+        },
+      },
+    },
+    false,
+    null,
+    "claude"
+  );
+
+  assert.deepEqual(translated.output_config.format, {
+    type: "json_schema",
+    schema,
+  });
+  assert.equal(
+    translated.system.some((block) =>
+      String(block.text || "").includes("strictly follows this JSON schema")
+    ),
+    false
+  );
+});
+
+test("translateRequest maps Responses structured output and strict tools to Claude native payload", () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      direct_reply: { type: "boolean" },
+    },
+    required: ["direct_reply"],
+  };
+
+  const translated = translateRequest(
+    FORMATS.OPENAI_RESPONSES,
+    FORMATS.CLAUDE,
+    "claude-haiku-4-5",
+    {
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "hello" }],
+        },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "planner_reply",
+          schema,
+          strict: true,
+        },
+      },
+      tools: [
+        {
+          type: "function",
+          name: "commit_booking",
+          description: "Commit the booking draft",
+          parameters: { type: "object", additionalProperties: false, properties: {}, required: [] },
+          strict: true,
+        },
+      ],
+    },
+    false,
+    null,
+    "claude"
+  );
+
+  assert.deepEqual(translated.output_config.format, {
+    type: "json_schema",
+    schema,
+  });
+  assert.equal(translated.tools[0].name, "proxy_commit_booking");
+  assert.equal(translated.tools[0].strict, true);
+  assert.deepEqual(translated.tools[0].input_schema, {
+    type: "object",
+    additionalProperties: false,
+    properties: {},
+    required: [],
+  });
+});
+
 test("translateRequest sanitizes OpenAI tool payloads on passthrough", () => {
   const translated = translateRequest(
     FORMATS.OPENAI,

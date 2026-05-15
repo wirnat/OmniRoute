@@ -1,23 +1,105 @@
+import { CORS_HEADERS, handleCorsOptions } from "@/shared/utils/cors";
 import { handleRerank } from "@omniroute/open-sse/handlers/rerank.ts";
-import { getProviderCredentials, clearRecoveredProviderState } from "@/sse/services/auth";
-import { parseRerankModel, getRerankProvider } from "@omniroute/open-sse/config/rerankRegistry.ts";
+import {
+  getProviderCredentials,
+  clearRecoveredProviderState,
+  extractApiKey,
+  isValidApiKey,
+} from "@/sse/services/auth";
+import { parseRerankModel } from "@omniroute/open-sse/config/rerankRegistry.ts";
 import { errorResponse } from "@omniroute/open-sse/utils/error.ts";
 import { HTTP_STATUS } from "@omniroute/open-sse/config/constants.ts";
 import { enforceApiKeyPolicy } from "@/shared/utils/apiKeyPolicy";
 import { v1RerankSchema } from "@/shared/validation/schemas";
 import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
 import { getProviderNodes } from "@/lib/localDb";
+import { saveCallLog } from "@/lib/usageDb";
+
+function estimateTextTokens(value: unknown) {
+  if (typeof value !== "string" || value.length === 0) return 0;
+  return Math.ceil(value.length / 4);
+}
+
+function getRerankDocumentText(document: unknown) {
+  if (typeof document === "string") return document;
+  if (document && typeof document === "object" && "text" in document) {
+    return typeof document.text === "string" ? document.text : "";
+  }
+  return "";
+}
+
+function estimateRerankInputTokens(body: unknown) {
+  if (!body || typeof body !== "object") return 0;
+
+  const queryTokens = "query" in body ? estimateTextTokens(body.query) : 0;
+  const documentTokens =
+    "documents" in body && Array.isArray(body.documents)
+      ? body.documents.reduce(
+          (total, document) => total + estimateTextTokens(getRerankDocumentText(document)),
+          0
+        )
+      : 0;
+
+  return queryTokens + documentTokens;
+}
+
+async function readResponseBodyForLog(response: Response) {
+  const contentType = response.headers.get("content-type") || "";
+  const clone = response.clone();
+
+  if (contentType.includes("application/json")) {
+    return clone.json().catch(() => null);
+  }
+
+  const text = await clone.text().catch(() => "");
+  return text.length > 0 ? text : null;
+}
+
+async function recordAndReturnRerankResponse({
+  request,
+  body,
+  response,
+  provider,
+  model,
+  startedAt,
+}: {
+  request: Request;
+  body: unknown;
+  response: Response;
+  provider?: string | null;
+  model?: string | null;
+  startedAt: number;
+}) {
+  const responseBody = await readResponseBodyForLog(response);
+
+  await saveCallLog({
+    timestamp: new Date().toISOString(),
+    method: request.method,
+    path: new URL(request.url).pathname || "/api/v1/rerank",
+    status: response.status,
+    model: model || "-",
+    requestedModel:
+      body && typeof body === "object" && "model" in body ? String(body.model || "") : null,
+    provider: provider || null,
+    duration: Date.now() - startedAt,
+    tokens: {
+      prompt_tokens: estimateRerankInputTokens(body),
+      completion_tokens: 0,
+    },
+    requestType: "rerank",
+    requestBody: body || null,
+    responseBody,
+    error: response.ok ? null : responseBody,
+  });
+
+  return response;
+}
 
 /**
  * Handle CORS preflight
  */
 export async function OPTIONS() {
-  return new Response(null, {
-    headers: {
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "*",
-    },
-  });
+  return handleCorsOptions();
 }
 
 /**
@@ -45,22 +127,72 @@ function buildDynamicRerankProvider(node: any) {
  * and local provider_nodes (oMLX, vLLM, etc.) via dynamic routing.
  */
 export async function POST(request) {
+  const startedAt = Date.now();
+
+  // Optional API key validation
+  if (process.env.REQUIRE_API_KEY === "true") {
+    const apiKey = extractApiKey(request);
+    if (!apiKey) {
+      const response = errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
+      return recordAndReturnRerankResponse({
+        request,
+        body: null,
+        response,
+        startedAt,
+      });
+    }
+    const valid = await isValidApiKey(apiKey);
+    if (!valid) {
+      const response = errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
+      return recordAndReturnRerankResponse({
+        request,
+        body: null,
+        response,
+        startedAt,
+      });
+    }
+  }
+
   let rawBody;
   try {
     rawBody = await request.json();
   } catch {
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
+    const response = errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
+    return recordAndReturnRerankResponse({
+      request,
+      body: null,
+      response,
+      startedAt,
+    });
   }
 
   const validation = validateBody(v1RerankSchema, rawBody);
   if (isValidationFailure(validation)) {
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, validation.error.message);
+    const response = errorResponse(HTTP_STATUS.BAD_REQUEST, validation.error.message);
+    return recordAndReturnRerankResponse({
+      request,
+      body: rawBody,
+      response,
+      model:
+        rawBody && typeof rawBody === "object" && "model" in rawBody
+          ? String(rawBody.model || "")
+          : null,
+      startedAt,
+    });
   }
   const body = validation.data;
 
   // Enforce API key policies (model restrictions + budget limits)
   const policy = await enforceApiKeyPolicy(request, body.model);
-  if (policy.rejection) return policy.rejection;
+  if (policy.rejection) {
+    return recordAndReturnRerankResponse({
+      request,
+      body,
+      response: policy.rejection,
+      model: body.model,
+      startedAt,
+    });
+  }
 
   // Load local provider_nodes for rerank routing (localhost only)
   let localProviders: ReturnType<typeof buildDynamicRerankProvider>[] = [];
@@ -99,7 +231,18 @@ export async function POST(request) {
     // Cloud provider matched
     const credentials = await getProviderCredentials(provider);
     if (!credentials) {
-      return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);
+      const response = errorResponse(
+        HTTP_STATUS.BAD_REQUEST,
+        `No credentials for provider: ${provider}`
+      );
+      return recordAndReturnRerankResponse({
+        request,
+        body,
+        response,
+        provider,
+        model: modelId,
+        startedAt,
+      });
     }
 
     const response = await handleRerank({
@@ -113,7 +256,14 @@ export async function POST(request) {
     if (response?.ok) {
       await clearRecoveredProviderState(credentials);
     }
-    return response;
+    return recordAndReturnRerankResponse({
+      request,
+      body,
+      response,
+      provider,
+      model: modelId,
+      startedAt,
+    });
   }
 
   // Try local provider_nodes (model format: prefix/model-name)
@@ -126,10 +276,18 @@ export async function POST(request) {
     if (localProvider) {
       const credentials = await getProviderCredentials(localProvider.providerId);
       if (!credentials) {
-        return errorResponse(
+        const response = errorResponse(
           HTTP_STATUS.BAD_REQUEST,
           `No credentials for local provider: ${prefix}`
         );
+        return recordAndReturnRerankResponse({
+          request,
+          body,
+          response,
+          provider: prefix,
+          model: localModel,
+          startedAt,
+        });
       }
 
       const token = credentials?.apiKey || credentials?.accessToken;
@@ -151,24 +309,55 @@ export async function POST(request) {
 
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
-          return errorResponse(
+          const response = errorResponse(
             res.status,
             errData.message || errData.detail || `Provider returned HTTP ${res.status}`
           );
+          return recordAndReturnRerankResponse({
+            request,
+            body,
+            response,
+            provider: prefix,
+            model: localModel,
+            startedAt,
+          });
         }
 
         const data = await res.json();
-        return Response.json(data, {
-          headers: {},
+        const response = Response.json(data, {
+          headers: CORS_HEADERS,
+        });
+        return recordAndReturnRerankResponse({
+          request,
+          body,
+          response,
+          provider: prefix,
+          model: localModel,
+          startedAt,
         });
       } catch (err: any) {
-        return errorResponse(500, `Rerank request failed: ${err.message}`);
+        const response = errorResponse(500, `Rerank request failed: ${err.message}`);
+        return recordAndReturnRerankResponse({
+          request,
+          body,
+          response,
+          provider: prefix,
+          model: localModel,
+          startedAt,
+        });
       }
     }
   }
 
-  return errorResponse(
+  const response = errorResponse(
     HTTP_STATUS.BAD_REQUEST,
     `Invalid rerank model: ${body.model}. Use format: provider/model`
   );
+  return recordAndReturnRerankResponse({
+    request,
+    body,
+    response,
+    model: body.model,
+    startedAt,
+  });
 }

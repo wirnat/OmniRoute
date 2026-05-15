@@ -8,6 +8,7 @@ import {
 import { PROVIDERS } from "../config/constants.ts";
 import { v4 as uuidv4 } from "uuid";
 import { refreshKiroToken } from "../services/tokenRefresh.ts";
+import { isKiroDeveloperRoleRefusal } from "../services/kiroRefusal.ts";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -168,6 +169,53 @@ function ensureKiroUsage(state: KiroStreamState) {
   };
 }
 
+function appendBytes(left: Uint8Array, right: Uint8Array) {
+  const next = new Uint8Array(left.length + right.length);
+  next.set(left);
+  next.set(right, left.length);
+  return next;
+}
+
+function replayPrefetchedResponse(
+  response: Response,
+  prefetchedChunks: Uint8Array[],
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  streamEnded: boolean
+) {
+  const replayBody = new ReadableStream({
+    async start(controller) {
+      for (const chunk of prefetchedChunks) {
+        controller.enqueue(chunk);
+      }
+
+      if (streamEnded) {
+        controller.close();
+        return;
+      }
+
+      try {
+        while (true) {
+          const read = await reader.read();
+          if (read.done) break;
+          controller.enqueue(read.value);
+        }
+        controller.close();
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+
+  return new Response(replayBody, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
 /**
  * KiroExecutor - Executor for Kiro AI (AWS CodeWhisperer)
  * Uses AWS CodeWhisperer streaming API with AWS EventStream binary format
@@ -243,11 +291,84 @@ export class KiroExecutor extends BaseExecutor {
       return { response, url, headers, transformedBody };
     }
 
+    const guardedResponse = await this.guardDeveloperRoleRefusal(response);
+    if (!guardedResponse.ok) {
+      return { response: guardedResponse, url, headers, transformedBody };
+    }
+
     // For Kiro, we need to transform the binary EventStream to SSE
     // Create a TransformStream to convert binary to SSE text
-    const transformedResponse = this.transformEventStreamToSSE(response, model);
+    const transformedResponse = this.transformEventStreamToSSE(guardedResponse, model);
 
     return { response: transformedResponse, url, headers, transformedBody };
+  }
+
+  private async guardDeveloperRoleRefusal(response: Response): Promise<Response> {
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/vnd.amazon.eventstream") || !response.body) {
+      return response;
+    }
+
+    const reader = response.body.getReader();
+    const prefetchedChunks: Uint8Array[] = [];
+    let parseBuffer = new Uint8Array(0);
+    let assistantText = "";
+    let parsedFrames = 0;
+    let streamEnded = false;
+
+    try {
+      while (parsedFrames < 20 && assistantText.length < 1024) {
+        const read = await reader.read();
+        if (read.done) {
+          streamEnded = true;
+          break;
+        }
+
+        prefetchedChunks.push(read.value);
+        parseBuffer = appendBytes(parseBuffer, read.value);
+
+        while (parseBuffer.length >= 16) {
+          const view = new DataView(parseBuffer.buffer, parseBuffer.byteOffset);
+          const totalLength = view.getUint32(0, false);
+          if (totalLength < 16 || totalLength > parseBuffer.length) break;
+
+          const eventData = parseBuffer.slice(0, totalLength);
+          parseBuffer = parseBuffer.slice(totalLength);
+          parsedFrames++;
+
+          const event = parseEventFrame(eventData);
+          if (!event) continue;
+
+          const eventType = event.headers[":event-type"] || "";
+          if (eventType !== "assistantResponseEvent") continue;
+
+          const content = typeof event.payload?.content === "string" ? event.payload.content : "";
+          assistantText += content;
+
+          if (isKiroDeveloperRoleRefusal(assistantText)) {
+            await reader.cancel().catch(() => {});
+            return new Response(
+              JSON.stringify({
+                error: {
+                  message: "Kiro developer-role refusal detected",
+                  type: "provider_error",
+                  code: "kiro_developer_role_refusal",
+                },
+              }),
+              { status: 502, headers: { "Content-Type": "application/json" } }
+            );
+          }
+        }
+
+        if (assistantText.length >= 256 && !isKiroDeveloperRoleRefusal(assistantText)) {
+          break;
+        }
+      }
+    } catch {
+      return replayPrefetchedResponse(response, prefetchedChunks, reader, streamEnded);
+    }
+
+    return replayPrefetchedResponse(response, prefetchedChunks, reader, streamEnded);
   }
 
   /**

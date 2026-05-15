@@ -24,6 +24,10 @@ export interface EmbeddingProviderNodeRow {
   apiType?: string;
 }
 
+export function toPublicEmbeddingModelId(providerId: string, modelId: string): string {
+  return modelId.startsWith(providerId + "/") ? modelId : `${providerId}/${modelId}`;
+}
+
 /**
  * Build a dynamic EmbeddingProvider from a local provider_node.
  * Only used for local providers (localhost) — caller must filter by hostname.
@@ -225,10 +229,6 @@ function normalizeProviderScopedModelId(providerId: string, modelId: string): st
   return modelId.startsWith(`${providerId}/`) ? modelId.slice(providerId.length + 1) : modelId;
 }
 
-function toProviderScopedModelId(providerId: string, modelId: string): string {
-  return modelId.startsWith(`${providerId}/`) ? modelId : `${providerId}/${modelId}`;
-}
-
 /**
  * Get embedding provider config by ID
  */
@@ -260,8 +260,11 @@ export function parseEmbeddingModel(
     }
 
     // Phase 1: Try each hardcoded provider prefix
-    for (const [providerId] of Object.entries(EMBEDDING_PROVIDERS)) {
+    for (const [providerId, config] of Object.entries(EMBEDDING_PROVIDERS)) {
       if (modelStr.startsWith(providerId + "/")) {
+        if (config.models.some((m) => m.id === modelStr)) {
+          return { provider: providerId, model: modelStr };
+        }
         return {
           provider: providerId,
           model: normalizeProviderScopedModelId(providerId, modelStr.slice(providerId.length + 1)),
@@ -300,7 +303,7 @@ export function getAllEmbeddingModels() {
   for (const [providerId, config] of Object.entries(EMBEDDING_PROVIDERS)) {
     for (const model of config.models) {
       models.push({
-        id: toProviderScopedModelId(providerId, model.id),
+        id: toPublicEmbeddingModelId(providerId, model.id),
         name: model.name,
         provider: providerId,
         dimensions: model.dimensions,

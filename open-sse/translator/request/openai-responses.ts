@@ -36,6 +36,55 @@ function unsupportedFeature(message: string): Error & { statusCode: number; erro
   return error;
 }
 
+function mapResponsesTextConfig(result: JsonRecord, root: JsonRecord): void {
+  const textConfig = toRecord(root.text);
+  if (Object.keys(textConfig).length === 0) return;
+
+  const format = toRecord(textConfig.format);
+  const formatType = toString(format.type);
+  if (!formatType || result.response_format !== undefined) return;
+
+  if (formatType === "json_object") {
+    result.response_format = { type: "json_object" };
+    return;
+  }
+
+  if (formatType !== "json_schema") return;
+
+  const nestedSchema = toRecord(format.json_schema);
+  const schema =
+    format.schema !== undefined
+      ? format.schema
+      : nestedSchema.schema !== undefined
+        ? nestedSchema.schema
+        : Object.keys(nestedSchema).length > 0
+          ? nestedSchema
+          : undefined;
+  if (schema === undefined) return;
+
+  const jsonSchema: JsonRecord = {
+    schema,
+  };
+
+  const name = toString(format.name) || toString(nestedSchema.name);
+  const description = toString(format.description) || toString(nestedSchema.description);
+  const strict =
+    typeof format.strict === "boolean"
+      ? format.strict
+      : typeof nestedSchema.strict === "boolean"
+        ? nestedSchema.strict
+        : undefined;
+
+  if (name) jsonSchema.name = name;
+  if (description) jsonSchema.description = description;
+  if (strict !== undefined) jsonSchema.strict = strict;
+
+  result.response_format = {
+    type: "json_schema",
+    json_schema: jsonSchema,
+  };
+}
+
 /**
  * Convert OpenAI Responses API request to OpenAI Chat Completions format
  */
@@ -86,6 +135,11 @@ export function openaiResponsesToOpenAIRequest(
   const result: JsonRecord = { ...root };
   const messages: JsonRecord[] = [];
   result.messages = messages;
+
+  if (root.max_output_tokens !== undefined && result.max_tokens === undefined) {
+    result.max_tokens = root.max_output_tokens;
+  }
+  mapResponsesTextConfig(result, root);
 
   // Convert instructions to system message
   if (typeof root.instructions === "string" && root.instructions.length > 0) {
@@ -293,6 +347,8 @@ export function openaiResponsesToOpenAIRequest(
   }
   delete result.store;
   delete result.reasoning;
+  delete result.max_output_tokens;
+  delete result.text;
 
   return result;
 }

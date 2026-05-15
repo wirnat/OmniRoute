@@ -215,3 +215,42 @@ test("handleEmbedding surfaces upstream failures", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("handleEmbedding normalizes public NVIDIA model ids without duplicating the provider prefix", async () => {
+  const originalFetch = globalThis.fetch;
+  let captured;
+
+  globalThis.fetch = async (url, options = {}) => {
+    captured = {
+      url: String(url),
+      body: JSON.parse(String(options.body || "{}")),
+    };
+
+    return new Response(
+      JSON.stringify({
+        data: [{ object: "embedding", embedding: [0.3, 0.4], index: 0 }],
+        usage: { prompt_tokens: 5, total_tokens: 5 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  };
+
+  try {
+    const result = await handleEmbedding({
+      body: {
+        model: "nvidia/nv-embedqa-e5-v5",
+        input: "hello",
+        input_type: "query",
+      },
+      credentials: { apiKey: "nvidia-key" },
+      log: null,
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(captured.url, "https://integrate.api.nvidia.com/v1/embeddings");
+    assert.equal(captured.body.model, "nvidia/nv-embedqa-e5-v5");
+    assert.equal(result.data.model, "nvidia/nv-embedqa-e5-v5");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

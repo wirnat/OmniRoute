@@ -56,6 +56,21 @@ describe("OpenRouter & GitHub registry entries (#960)", () => {
     });
   });
 
+  describe("embeddingRegistry — nvidia", () => {
+    it("parses nvidia/nv-embedqa-e5-v5 without dropping the required upstream namespace", () => {
+      const result = parseEmbeddingModel("nvidia/nv-embedqa-e5-v5");
+      assert.equal(result.provider, "nvidia");
+      assert.equal(result.model, "nvidia/nv-embedqa-e5-v5");
+    });
+
+    it("nvidia models appear once in getAllEmbeddingModels", () => {
+      const all = getAllEmbeddingModels();
+      const nvidiaModels = all.filter((m) => m.provider === "nvidia");
+      assert.ok(nvidiaModels.some((m) => m.id === "nvidia/nv-embedqa-e5-v5"));
+      assert.ok(nvidiaModels.every((m) => !m.id.startsWith("nvidia/nvidia/")));
+    });
+  });
+
   // ── Image Registry ───────────────────────────────────────────────────────
 
   describe("imageRegistry — openrouter", () => {

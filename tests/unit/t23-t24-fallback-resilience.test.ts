@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const { checkFallbackError } = await import("../../open-sse/services/accountFallback.ts");
-const { handleComboChat } = await import("../../open-sse/services/combo.ts");
+const { handleComboChat, shouldFallbackComboBadRequest } =
+  await import("../../open-sse/services/combo.ts");
 const { resetAllCircuitBreakers } = await import("../../src/shared/utils/circuitBreaker.ts");
 
 test.beforeEach(() => {
@@ -144,6 +145,7 @@ test("T24: all inactive accounts return 503 service_unavailable (not 406)", asyn
 
 test("combo falls through 400s and reaches the next model", async () => {
   const calls = [];
+  const log = createLog();
   const sequence = [
     { status: 429, message: "No capacity available for model gemini-3.1-pro-preview" },
     { status: 400, message: "bad request" },
@@ -174,7 +176,7 @@ test("combo falls through 400s and reaches the next model", async () => {
       });
     },
     isModelAvailable: () => true,
-    log: createLog(),
+    log,
     settings: null,
     allCombos: null,
   });
@@ -185,4 +187,78 @@ test("combo falls through 400s and reaches the next model", async () => {
     "aio/gemini-3.1-pro-preview-thinking-high",
     "openrouter/google/gemini-3.1-pro-preview",
   ]);
+});
+
+test("combo falls through unsupported property 400s and reaches the next model", async () => {
+  const log = createLog();
+
+  const result = await handleComboChat({
+    body: {},
+    combo: {
+      name: "t24-unsupported-property-400",
+      strategy: "priority",
+      models: [
+        { model: "groq/openai/gpt-oss-120b", weight: 0 },
+        { model: "kr/claude-haiku-4.5", weight: 0 },
+      ],
+    },
+    handleSingleModel: createStatusSequenceHandler([
+      { status: 400, message: "property 'text' is unsupported" },
+      { status: 200 },
+    ]),
+    isModelAvailable: () => true,
+    log,
+    settings: null,
+    allCombos: null,
+  });
+
+  assert.equal(result.ok, true);
+});
+
+test("combo falls through failed JSON validation 400s and reaches the next model", async () => {
+  const log = createLog();
+
+  const result = await handleComboChat({
+    body: {},
+    combo: {
+      name: "t24-json-validation-400",
+      strategy: "priority",
+      models: [
+        { model: "groq/openai/gpt-oss-120b", weight: 0 },
+        { model: "kr/claude-haiku-4.5", weight: 0 },
+      ],
+    },
+    handleSingleModel: createStatusSequenceHandler([
+      {
+        status: 400,
+        message:
+          "Failed to validate JSON. Please adjust your prompt. See 'failed_generation' for more details.",
+      },
+      { status: 200 },
+    ]),
+    isModelAvailable: () => true,
+    log,
+    settings: null,
+    allCombos: null,
+  });
+
+  assert.equal(result.ok, true);
+});
+
+test("combo bad-request fallback helper keeps generic 400s terminal", () => {
+  assert.equal(shouldFallbackComboBadRequest(400, "request blocked by Gemini API"), true);
+  assert.equal(
+    shouldFallbackComboBadRequest(400, "One or more of the provided message roles is not valid"),
+    true
+  );
+  assert.equal(shouldFallbackComboBadRequest(400, "property 'text' is unsupported"), true);
+  assert.equal(
+    shouldFallbackComboBadRequest(
+      400,
+      "Failed to validate JSON. Please adjust your prompt. See 'failed_generation' for more details."
+    ),
+    true
+  );
+  assert.equal(shouldFallbackComboBadRequest(400, "bad request"), false);
+  assert.equal(shouldFallbackComboBadRequest(422, "request blocked by Gemini API"), false);
 });

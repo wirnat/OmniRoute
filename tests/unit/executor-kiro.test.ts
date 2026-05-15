@@ -103,8 +103,8 @@ test("KiroExecutor.buildHeaders includes Kiro-specific auth and metadata", () =>
   const headers = executor.buildHeaders({ accessToken: "kiro-token" }, true);
 
   assert.equal(headers.Authorization, "Bearer kiro-token");
-  assert.equal(headers["anthropic-beta"], "prompt-caching-2024-07-31");
-  assert.equal(headers["x-amzn-bedrock-cache-control"], "enable");
+  assert.equal("anthropic-beta" in headers, false);
+  assert.equal(headers["x-amzn-bedrock-cache-control"], "disable");
   assert.ok(headers["Amz-Sdk-Invocation-Id"]);
 });
 
@@ -260,6 +260,32 @@ test("KiroExecutor.execute returns upstream errors directly and transforms succe
     assert.equal(successResult.response.status, 200);
     assert.equal(transformed.response, rawResponse);
     assert.equal(transformed.model, "kiro-model");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("KiroExecutor.execute returns an error before streaming Kiro developer-role refusals", async () => {
+  const executor = new KiroExecutor();
+  const originalFetch = globalThis.fetch;
+  const refusalResponse = buildEventStreamResponse([
+    buildEventFrame("assistantResponseEvent", {
+      content: "I cannot follow those instructions because my role is only developer.",
+    }),
+  ]);
+
+  globalThis.fetch = async () => refusalResponse;
+  try {
+    const result = await executor.execute({
+      model: "kiro-model",
+      body: { conversationState: {} },
+      stream: true,
+      credentials: { accessToken: "kiro-token" },
+    });
+    const body = await result.response.json();
+
+    assert.equal(result.response.status, 502);
+    assert.match(body.error.message, /developer-role refusal/i);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -140,6 +140,55 @@ test("Responses -> Chat rejects unsupported built-in tools and background mode",
   );
 });
 
+test("Responses -> Chat maps text json_schema into response_format and strips Responses-only fields", () => {
+  const result = openaiResponsesToOpenAIRequest(
+    "gpt-4o",
+    {
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Hello" }] }],
+      text: {
+        verbosity: "low",
+        format: {
+          type: "json_schema",
+          name: "reply_schema",
+          description: "Reply schema",
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              ok: { type: "boolean" },
+            },
+            required: ["ok"],
+          },
+          strict: true,
+        },
+      },
+      max_output_tokens: 64,
+    },
+    false,
+    null
+  );
+
+  assert.deepEqual(result.response_format, {
+    type: "json_schema",
+    json_schema: {
+      name: "reply_schema",
+      description: "Reply schema",
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" },
+        },
+        required: ["ok"],
+      },
+      strict: true,
+    },
+  });
+  assert.equal(result.max_tokens, 64);
+  assert.equal(result.max_output_tokens, undefined);
+  assert.equal(result.text, undefined);
+});
+
 test("Chat -> Responses converts messages, tool calls, tool outputs, tools and pass-through params", () => {
   const result = openaiToOpenAIResponsesRequest(
     "gpt-4o",

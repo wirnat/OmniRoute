@@ -95,6 +95,53 @@ function normalizeOpenAIChatUrl(baseUrl) {
   return normalized.endsWith("/v1") ? `${normalized}/chat/completions` : normalized;
 }
 
+function injectJsonResponseInstructions(messages, responseFormat) {
+  const safeMessages = Array.isArray(messages) ? [...messages] : [];
+  if (!responseFormat || typeof responseFormat !== "object") return safeMessages;
+
+  let formatInstruction =
+    "Respond only with valid JSON. Do not include any text before or after the JSON object.";
+  if (responseFormat.type === "json_schema") {
+    const schema =
+      responseFormat?.json_schema?.schema ??
+      responseFormat?.json_schema ??
+      responseFormat?.schema ??
+      null;
+    if (schema) {
+      formatInstruction = `Respond only with valid JSON that matches this schema:\n${JSON.stringify(
+        schema,
+        null,
+        2
+      )}\nDo not include any text before or after the JSON object.`;
+    }
+  } else if (responseFormat.type !== "json_object") {
+    return safeMessages;
+  }
+
+  const systemIdx = safeMessages.findIndex((message) => message?.role === "system");
+  if (systemIdx >= 0) {
+    return safeMessages.map((message, index) =>
+      index === systemIdx
+        ? { ...message, content: `${message.content}\n\n${formatInstruction}` }
+        : message
+    );
+  }
+
+  return [{ role: "system", content: formatInstruction }, ...safeMessages];
+}
+
+function adaptDeepSeekStructuredOutput(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  const responseFormat = body.response_format;
+  if (!responseFormat || typeof responseFormat !== "object") return body;
+  if (responseFormat.type !== "json_schema") return body;
+
+  const nextBody = JSON.parse(JSON.stringify(body));
+  nextBody.messages = injectJsonResponseInstructions(nextBody.messages, responseFormat);
+  nextBody.response_format = { type: "json_object" };
+  return nextBody;
+}
+
 export class DefaultExecutor extends BaseExecutor {
   constructor(provider) {
     super(provider, PROVIDERS[provider] || PROVIDERS.openai);
@@ -393,6 +440,9 @@ export class DefaultExecutor extends BaseExecutor {
   transformRequest(model, body, stream, credentials) {
     const cleanedBody = super.transformRequest(model, body, stream, credentials);
     let withDefaults = applyProviderRequestDefaults(cleanedBody, this.config.requestDefaults);
+    if (this.provider === "deepseek") {
+      withDefaults = adaptDeepSeekStructuredOutput(withDefaults);
+    }
 
     if (typeof withDefaults === "object" && withDefaults !== null && !Array.isArray(withDefaults)) {
       if (this.provider?.startsWith?.("anthropic-compatible-")) {

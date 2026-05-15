@@ -25,9 +25,36 @@ type ClaudeTool = {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
+  strict?: boolean;
   cache_control?: { type: string; ttl?: string };
   defer_loading?: boolean;
 };
+
+function toClaudeStructuredOutputFormat(responseFormat: unknown): Record<string, unknown> | null {
+  if (!responseFormat || typeof responseFormat !== "object" || Array.isArray(responseFormat)) {
+    return null;
+  }
+
+  const format = responseFormat as Record<string, unknown>;
+  if (format.type !== "json_schema") {
+    return null;
+  }
+
+  const jsonSchema = format.json_schema;
+  if (!jsonSchema || typeof jsonSchema !== "object" || Array.isArray(jsonSchema)) {
+    return null;
+  }
+
+  const schema = (jsonSchema as Record<string, unknown>).schema;
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return null;
+  }
+
+  return {
+    type: "json_schema",
+    schema,
+  };
+}
 
 /**
  * T02: Recursively strips empty text blocks from content arrays.
@@ -269,11 +296,17 @@ export function openaiToClaudeRequest(model, body, stream) {
             ? { ...rawSchema, properties: {} }
             : rawSchema;
 
-        return {
+        const claudeTool: ClaudeTool = {
           name: toolName,
           description: toolData.description || "",
           input_schema: normalizedSchema,
         };
+
+        if (typeof toolData.strict === "boolean") {
+          claudeTool.strict = toolData.strict;
+        }
+
+        return claudeTool;
       })
       .filter((tool): tool is ClaudeTool => Boolean(tool));
 
@@ -295,12 +328,16 @@ export function openaiToClaudeRequest(model, body, stream) {
     result.tool_choice = convertOpenAIToolChoice(body.tool_choice);
   }
 
-  // response_format: inject JSON structured output instruction into system prompt.
-  // Claude doesn't natively support response_format, so we insert a system-level instruction.
-  // NOTE: systemParts are consumed later (after this block) — they're accumulated here.
+  // response_format: use Anthropic native structured output when possible.
   if (body.response_format) {
     const fmt = body.response_format;
-    if (fmt.type === "json_schema" && fmt.json_schema?.schema) {
+    const claudeFormat = toClaudeStructuredOutputFormat(fmt);
+    if (claudeFormat) {
+      result.output_config = {
+        ...(result.output_config || {}),
+        format: claudeFormat,
+      };
+    } else if (fmt.type === "json_schema" && fmt.json_schema?.schema) {
       const schemaJson = JSON.stringify(fmt.json_schema.schema, null, 2);
       systemParts.push(
         `You must respond with valid JSON that strictly follows this JSON schema:\n\`\`\`json\n${schemaJson}\n\`\`\`\nRespond ONLY with the JSON object, no other text.`

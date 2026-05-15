@@ -31,11 +31,11 @@ export const RERANK_PROVIDERS = {
 
   nvidia: {
     id: "nvidia",
-    baseUrl: "https://integrate.api.nvidia.com/v1/ranking",
+    baseUrl: "https://ai.api.nvidia.com/v1/retrieval/nvidia/reranking",
     authType: "apikey",
     authHeader: "bearer",
     format: "nvidia", // NVIDIA uses slightly different field names
-    models: [{ id: "nvidia/nv-rerankqa-mistral-4b-v3", name: "NV RerankQA Mistral 4B v3" }],
+    models: [{ id: "nvidia/rerank-qa-mistral-4b", name: "Rerank QA Mistral 4B" }],
   },
 
   fireworks: {
@@ -95,8 +95,8 @@ function normalizeProviderScopedModelId(providerId, modelId) {
   return modelId.startsWith(`${providerId}/`) ? modelId.slice(providerId.length + 1) : modelId;
 }
 
-function toProviderScopedModelId(providerId, modelId) {
-  return modelId.startsWith(`${providerId}/`) ? modelId : `${providerId}/${modelId}`;
+export function toPublicRerankModelId(providerId, modelId) {
+  return modelId.startsWith(providerId + "/") ? modelId : `${providerId}/${modelId}`;
 }
 
 /**
@@ -128,6 +128,9 @@ export function parseRerankModel(modelStr) {
   // Try each provider prefix
   for (const [providerId, config] of Object.entries(RERANK_PROVIDERS)) {
     if (modelStr.startsWith(providerId + "/")) {
+      if (config.models.some((m) => m.id === modelStr)) {
+        return { provider: providerId, model: modelStr };
+      }
       return {
         provider: providerId,
         model: normalizeProviderScopedModelId(providerId, modelStr.slice(providerId.length + 1)),
@@ -153,7 +156,7 @@ export function getAllRerankModels() {
   for (const [providerId, config] of Object.entries(RERANK_PROVIDERS)) {
     for (const model of config.models) {
       models.push({
-        id: toProviderScopedModelId(providerId, model.id),
+        id: toPublicRerankModelId(providerId, model.id),
         name: model.name,
         provider: providerId,
       });

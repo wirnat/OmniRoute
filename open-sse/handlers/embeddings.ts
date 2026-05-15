@@ -16,6 +16,7 @@
 import {
   getEmbeddingProvider,
   parseEmbeddingModel,
+  toPublicEmbeddingModelId,
   type EmbeddingProvider,
 } from "../config/embeddingRegistry.ts";
 import { saveCallLog } from "@/lib/usageDb";
@@ -120,6 +121,8 @@ export async function handleEmbedding({
     };
   }
 
+  const publicModelId = toPublicEmbeddingModelId(provider, model);
+
   // Build upstream request — start with standard fields, then forward extra fields
   // the client sent (e.g. input_type, user, truncate for NVIDIA NIM asymmetric models).
   const KNOWN_FIELDS = new Set(["model", "input", "dimensions", "encoding_format"]);
@@ -163,7 +166,7 @@ export async function handleEmbedding({
   if (log) {
     log.info(
       "EMBED",
-      `${provider}/${model} | input: ${Array.isArray(body.input) ? body.input.length + " items" : "1 item"}`
+      `${publicModelId} | input: ${Array.isArray(body.input) ? body.input.length + " items" : "1 item"}`
     );
   }
 
@@ -200,7 +203,7 @@ export async function handleEmbedding({
         method: "POST",
         path: "/v1/embeddings",
         status: response.status,
-        model: `${provider}/${model}`,
+        model: publicModelId,
         provider,
         duration: Date.now() - startTime,
         error: errorText.slice(0, 500),
@@ -228,7 +231,7 @@ export async function handleEmbedding({
     const normalizedResponse = {
       object: "list",
       data: data.data || data,
-      model: `${provider}/${model}`,
+      model: publicModelId,
       usage: data.usage || { prompt_tokens: 0, total_tokens: 0 },
     };
 
@@ -243,7 +246,7 @@ export async function handleEmbedding({
       method: "POST",
       path: "/v1/embeddings",
       status: 200,
-      model: `${provider}/${model}`,
+      model: publicModelId,
       provider,
       duration: Date.now() - startTime,
       tokens: {
@@ -283,7 +286,7 @@ export async function handleEmbedding({
       method: "POST",
       path: "/v1/embeddings",
       status: 502,
-      model: `${provider}/${model}`,
+      model: publicModelId,
       provider,
       duration: Date.now() - startTime,
       error: err.message,

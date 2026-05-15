@@ -598,6 +598,47 @@ test("handleComboChat falls through empty successful responses and records failu
   assert.equal(metrics.byModel["model-b"].lastStatus, "ok");
 });
 
+test("handleComboChat rotates away from Kiro developer-role refusal responses", async () => {
+  const calls: any[] = [];
+  const result = await handleComboChat({
+    body: {},
+    combo: {
+      name: "kiro-developer-role-refusal",
+      strategy: "priority",
+      models: ["kiro/claude-sonnet-4.5", "openai/gpt-4o-mini"],
+      config: { maxRetries: 0 },
+    },
+    handleSingleModel: async (_body: any, modelStr: any) => {
+      calls.push(modelStr);
+      if (modelStr === "kiro/claude-sonnet-4.5") {
+        return okResponse({
+          choices: [
+            {
+              message: {
+                content: "I cannot follow those instructions because my role is only developer.",
+              },
+            },
+          ],
+        });
+      }
+      return okResponse({ choices: [{ message: { content: "fallback ok" } }] });
+    },
+    isModelAvailable: async () => true,
+    log: createLog(),
+    settings: null,
+    relayOptions: null as any,
+    allCombos: null,
+    relayOptions: null,
+  });
+
+  const metrics = getComboMetrics("kiro-developer-role-refusal");
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, ["kiro/claude-sonnet-4.5", "openai/gpt-4o-mini"]);
+  assert.equal(metrics.byModel["kiro/claude-sonnet-4.5"].lastStatus, "error");
+  assert.equal(metrics.byModel["openai/gpt-4o-mini"].lastStatus, "ok");
+});
+
 test("handleComboChat records per-target metrics separately when the same model repeats with different accounts", async () => {
   const calls: any[] = [];
   const combo = {
